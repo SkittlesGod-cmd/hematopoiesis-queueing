@@ -180,7 +180,8 @@ def cluster_leiden(
     The same AnnData with ``adata.obs[key_added]`` added.
     """
     sc.pp.neighbors(adata, n_neighbors=n_neighbors, key=neighbors_key)
-    sc.tl.leiden(adata, resolution=resolution, key_added=key_added)
+    sc.tl.leiden(adata, resolution=resolution, key_added=key_added,
+                 flavor="igraph", n_iterations=2, directed=False)
     adata.obs[key_added] = adata.obs[key_added].astype("category")
     return adata
 

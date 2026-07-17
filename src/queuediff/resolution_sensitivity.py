@@ -72,7 +72,8 @@ def run_resolution_sweep(
         key = f"{leiden_base_key}_res{str(res).replace('.', '_')}"
 
         # Run Leiden on the EXISTING neighbors graph (reuse graph, only vary resolution)
-        sc.tl.leiden(adata, resolution=res, neighbors_key=neighbors_key, key_added=key)
+        sc.tl.leiden(adata, resolution=res, neighbors_key=neighbors_key, key_added=key,
+                     flavor="igraph", n_iterations=2, directed=False)
         adata.obs[key] = adata.obs[key].astype("category")
 
         # Compute concordance using structural_crosscheck logic
