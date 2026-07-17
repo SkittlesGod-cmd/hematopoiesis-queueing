@@ -23,6 +23,7 @@ dependencies = [
     "matplotlib>=3.10,<3.11",
     "seaborn==0.13.2",
     "plotly==6.9.0",
+    "scikit-misc==0.5.2",
 ]
 
 [project.optional-dependencies]

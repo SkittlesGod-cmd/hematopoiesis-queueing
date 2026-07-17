@@ -6,6 +6,7 @@ igraph==1.0.0
 numpy==2.4.4
 pandas==2.3.3
 numba>=0.63.0
+scikit-misc==0.5.2
 
 # Statistics: distribution fitting (gamma/exponential MLE), survival analysis, AIC/BIC/LRT model comparison
 lifelines==0.30.3

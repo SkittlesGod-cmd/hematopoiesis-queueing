@@ -117,11 +117,14 @@ def preprocess_standard(
     Steps:
         1. Filter cells with fewer than *min_genes* detected.
         2. Filter genes detected in fewer than *min_cells*.
-        3. Total-count normalise to 10 000 per cell.
-        4. Log1p transform.
-        5. Select *n_top_genes* highly variable genes.
-        6. Scale to unit variance (clip at 10).
-        7. Run PCA (*n_pcs* components).
+        3. Select *n_top_genes* highly variable genes on RAW COUNTS
+           (required for flavor='seurat_v3').
+        4. Subset to HVGs.
+        5. Total-count normalise to 10,000 per cell.
+        6. Log1p transform.
+        7. Convert to dense array (HVG subset is small: ~2000 genes).
+        8. Scale to unit variance (clip at 10).
+        9. Run PCA (*n_pcs* components).
 
     Parameters
     ----------
@@ -142,10 +145,15 @@ def preprocess_standard(
     """
     sc.pp.filter_cells(adata, min_genes=min_genes)
     sc.pp.filter_genes(adata, min_cells=min_cells)
-    sc.pp.normalize_total(adata, target_sum=1e4)
-    sc.pp.log1p(adata)
+    # HVG selection on raw counts (seurat_v3 requires raw counts)
     sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, flavor="seurat_v3")
     adata = adata[:, adata.var.highly_variable].copy()
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.log1p(adata)
+    # Explicit dense conversion for HVG subset (~2000 genes) to avoid
+    # silent sparse densification warning during scaling
+    if hasattr(adata.X, "toarray"):
+        adata.X = adata.X.toarray()
     sc.pp.scale(adata, max_value=10)
     sc.tl.pca(adata, n_comps=n_pcs, svd_solver="arpack")
     return adata
