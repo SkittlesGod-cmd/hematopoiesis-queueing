@@ -100,6 +100,83 @@ def run_resolution_sweep(
     return pd.DataFrame(results)
 
 
+def compute_marker_leiden_purity(
+    adata: sc.AnnData,
+    marker_state_col: str = "marker_state",
+    leiden_key: str = "leiden_cluster",
+) -> pd.DataFrame:
+    """Compute purity and completeness between marker states and Leiden clusters.
+
+    For each marker state:
+    - **purity**: fraction of cells in that marker state that belong to the
+      dominant Leiden cluster (high = marker state maps cleanly to one cluster).
+    - **completeness**: fraction of the dominant Leiden cluster that consists
+      of cells from that marker state (high = cluster is not polluted by other states).
+
+    Parameters
+    ----------
+    adata
+        AnnData with ``marker_state_col`` and ``leiden_key`` in ``.obs``.
+    marker_state_col
+        Column in ``adata.obs`` with marker-based state assignments.
+    leiden_key
+        Column in ``adata.obs`` with Leiden cluster assignments.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per marker state with columns:
+        - marker_state: the state name
+        - n_cells: number of cells in this state
+        - dominant_leiden_cluster: the Leiden cluster with most cells from this state
+        - purity: n_cells_in_dominant_cluster / n_cells_total
+        - completeness: n_cells_in_dominant_cluster / n_cells_in_dominant_cluster_total
+    """
+    if marker_state_col not in adata.obs.columns:
+        raise ValueError(f"'{marker_state_col}' not found in adata.obs")
+    if leiden_key not in adata.obs.columns:
+        raise ValueError(f"'{leiden_key}' not found in adata.obs")
+
+    # Cross-tabulation of marker state vs Leiden cluster
+    ct = pd.crosstab(adata.obs[marker_state_col], adata.obs[leiden_key])
+
+    results = []
+    for marker_state in ct.index:
+        row = ct.loc[marker_state]
+        n_total = row.sum()
+
+        if n_total == 0:
+            results.append({
+                "marker_state": marker_state,
+                "n_cells": 0,
+                "dominant_leiden_cluster": None,
+                "purity": np.nan,
+                "completeness": np.nan,
+            })
+            continue
+
+        # Dominant Leiden cluster for this marker state
+        dominant_cluster = row.idxmax()
+        n_in_dominant = row.max()
+
+        # Purity: of cells in this marker state, what fraction are in the dominant cluster?
+        purity = n_in_dominant / n_total
+
+        # Completeness: of cells in the dominant cluster, what fraction are from this marker state?
+        n_in_cluster_total = ct[dominant_cluster].sum()
+        completeness = n_in_dominant / n_in_cluster_total if n_in_cluster_total > 0 else np.nan
+
+        results.append({
+            "marker_state": marker_state,
+            "n_cells": int(n_total),
+            "dominant_leiden_cluster": str(dominant_cluster),
+            "purity": float(purity),
+            "completeness": float(completeness),
+        })
+
+    return pd.DataFrame(results)
+
+
 def summarize_stability(sweep_df: pd.DataFrame, stability_threshold: float = 0.15) -> Dict:
     """Summarize concordance stability across resolutions.
 
@@ -229,6 +306,27 @@ if __name__ == "__main__":
     summary = summarize_stability(sweep_df)
     for k, v in summary.items():
         print(f"  {k}: {v}")
+
+    # Compute marker-Leiden purity at the peak resolution (0.6)
+    print("\n" + "=" * 70)
+    print("MARKER-LEIDEN PURITY / COMPLETENESS AT RESOLUTION 0.6")
+    print("=" * 70)
+    leiden_key_06 = "leiden_cluster_res0_6"
+    if leiden_key_06 not in adata.obs.columns:
+        # Re-run at 0.6 if not present (should be present from sweep)
+        sc.tl.leiden(adata, resolution=0.6, neighbors_key=None, key_added=leiden_key_06,
+                     flavor="igraph", n_iterations=2, directed=False)
+        adata.obs[leiden_key_06] = adata.obs[leiden_key_06].astype("category")
+
+    purity_df = compute_marker_leiden_purity(adata, marker_state_col="marker_state",
+                                              leiden_key=leiden_key_06)
+    print(purity_df.to_string(index=False))
+
+    # Summary stats
+    print(f"\n  Mean purity:     {purity_df['purity'].mean():.3f}")
+    print(f"  Mean completeness: {purity_df['completeness'].mean():.3f}")
+    print(f"  Min purity:      {purity_df['purity'].min():.3f}")
+    print(f"  Min completeness:  {purity_df['completeness'].min():.3f}")
 
     print("\n" + "=" * 70)
     print(f"OVERALL: {'PASS' if summary['is_stable'] else 'FAIL'} "
