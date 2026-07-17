@@ -1,0 +1,15 @@
+scanpy
+anndata
+leidenalg
+python-igraph
+lifelines
+scipy
+statsmodels
+numpy
+pandas
+networkx
+matplotlib
+seaborn
+plotly
+pytest
+jupyter

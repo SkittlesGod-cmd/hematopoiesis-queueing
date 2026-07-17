@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Virtual environment
+venv/
+.env
+
+# Data (raw and processed are too large or not to be committed)
+data/raw/
+data/processed/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Results generated from pipeline (committed only when needed)
+# results/ is kept but individual outputs can be added as needed
