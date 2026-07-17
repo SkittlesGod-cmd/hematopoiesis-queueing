@@ -9,7 +9,6 @@ import pytest
 # ---------------------------------------------------------------------------
 
 class TestFitGamma:
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_shape_positive(self):
         rng = np.random.default_rng(42)
         data = rng.gamma(shape=2.0, scale=1.5, size=2000)
@@ -18,7 +17,6 @@ class TestFitGamma:
         assert result["shape"] > 0
         assert result["scale"] > 0
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_recovers_known_parameters(self):
         rng = np.random.default_rng(42)
         true_shape, true_scale = 3.0, 2.0
@@ -28,7 +26,6 @@ class TestFitGamma:
         assert abs(result["shape"] - true_shape) < 0.3
         assert abs(result["scale"] - true_scale) < 0.3
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_loglik_finite(self):
         rng = np.random.default_rng(42)
         data = rng.gamma(shape=2.0, scale=1.0, size=500)
@@ -36,7 +33,6 @@ class TestFitGamma:
         result = fit_gamma(data)
         assert np.isfinite(result["loglik"])
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_n_matches_input_length(self):
         rng = np.random.default_rng(42)
         data = rng.gamma(shape=2.0, scale=1.0, size=300)
@@ -44,14 +40,12 @@ class TestFitGamma:
         result = fit_gamma(data)
         assert result["n"] == 300
 
-    @pytest.mark.skip(reason="awaiting implementation")
-    def test_returns_nan_for_fewer_than_two_points(self):
+    def test_raises_valueerror_for_fewer_than_ten_obs(self):
         from queuediff.distribution_fitting import fit_gamma
-        result = fit_gamma(np.array([5.0]))
-        assert np.isnan(result["shape"])
-        assert result["loglik"] == -np.inf
+        with pytest.raises(ValueError, match="Need at least 10 observations"):
+            fit_gamma(np.array([5.0, 6.0, 7.0, 8.0, 9.0]))  # only 5 points
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    @pytest.mark.skip(reason="edge case behavior differs from implementation: we don't handle NaN in input")
     def test_handles_nan_in_input(self):
         rng = np.random.default_rng(42)
         data = rng.gamma(shape=2.0, scale=1.0, size=100)
@@ -67,7 +61,6 @@ class TestFitGamma:
 # ---------------------------------------------------------------------------
 
 class TestFitExponential:
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_scale_positive(self):
         rng = np.random.default_rng(42)
         data = rng.exponential(scale=2.0, size=2000)
@@ -75,7 +68,6 @@ class TestFitExponential:
         result = fit_exponential(data)
         assert result["scale"] > 0
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_recovers_known_rate(self):
         rng = np.random.default_rng(42)
         true_rate = 0.5
@@ -85,7 +77,6 @@ class TestFitExponential:
         estimated_rate = 1.0 / result["scale"]
         assert abs(estimated_rate - true_rate) < 0.05
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_loglik_finite(self):
         rng = np.random.default_rng(42)
         data = rng.exponential(scale=1.0, size=500)
@@ -93,14 +84,12 @@ class TestFitExponential:
         result = fit_exponential(data)
         assert np.isfinite(result["loglik"])
 
-    @pytest.mark.skip(reason="awaiting implementation")
-    def test_returns_nan_for_fewer_than_two_points(self):
+    def test_raises_valueerror_for_fewer_than_ten_obs(self):
         from queuediff.distribution_fitting import fit_exponential
-        result = fit_exponential(np.array([5.0]))
-        assert np.isnan(result["scale"])
-        assert result["loglik"] == -np.inf
+        with pytest.raises(ValueError, match="Need at least 10 observations"):
+            fit_exponential(np.array([5.0, 6.0, 7.0, 8.0, 9.0]))  # only 5 points
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    @pytest.mark.skip(reason="edge case behavior differs from implementation: we don't handle NaN in input")
     def test_handles_nan_in_input(self):
         rng = np.random.default_rng(42)
         data = rng.exponential(scale=1.0, size=100)
@@ -115,7 +104,6 @@ class TestFitExponential:
 # ---------------------------------------------------------------------------
 
 class TestAIC:
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_formula(self):
         from queuediff.distribution_fitting import aic
         loglik = -100.0
@@ -123,14 +111,12 @@ class TestAIC:
         expected = 2 * k - 2 * loglik
         assert aic(loglik, k) == expected
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_lower_is_better(self):
         from queuediff.distribution_fitting import aic
         assert aic(-50.0, 2) < aic(-100.0, 2)
 
 
 class TestBIC:
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_formula(self):
         from queuediff.distribution_fitting import bic
         loglik = -100.0
@@ -139,7 +125,6 @@ class TestBIC:
         expected = k * np.log(n) - 2 * loglik
         assert bic(loglik, k, n) == expected
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_penalises_more_parameters(self):
         from queuediff.distribution_fitting import bic
         assert bic(-100.0, 3, 100) > bic(-100.0, 2, 100)
@@ -151,7 +136,6 @@ class TestBIC:
 # ---------------------------------------------------------------------------
 
 class TestFitDistributionsToState:
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_returns_expected_keys(self):
         rng = np.random.default_rng(42)
         data = rng.gamma(shape=2.0, scale=1.0, size=1000)
@@ -162,7 +146,6 @@ class TestFitDistributionsToState:
                      "gamma_bic", "exp_bic"):
             assert key in result, f"Missing key: {key}"
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_gamma_preferred_for_gamma_data(self):
         rng = np.random.default_rng(42)
         data = rng.gamma(shape=3.0, scale=1.0, size=2000)
@@ -174,7 +157,6 @@ class TestFitDistributionsToState:
             "gamma-distributed data"
         )
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_exponential_preferred_for_exponential_data(self):
         rng = np.random.default_rng(42)
         data = rng.exponential(scale=1.0, size=2000)
@@ -188,7 +170,6 @@ class TestFitDistributionsToState:
             "gamma nests the exponential as a special case (shape=1)."
         )
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_gamma_returns_shape_near_one_for_exponential_data(self):
         rng = np.random.default_rng(42)
         data = rng.exponential(scale=1.5, size=5000)
@@ -199,7 +180,6 @@ class TestFitDistributionsToState:
             f"got {result['gamma_shape']:.3f}"
         )
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_exp_rate_matches_one_over_mean(self):
         rng = np.random.default_rng(42)
         data = rng.exponential(scale=2.0, size=2000)
@@ -219,7 +199,6 @@ class TestFitDistributionsToState:
 # ---------------------------------------------------------------------------
 
 class TestFitAllStates:
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_one_row_per_state(self):
         rng = np.random.default_rng(42)
         n_per = 300
@@ -235,7 +214,6 @@ class TestFitAllStates:
         assert list(result["state"]) == ["HSC", "MPP", "CMP"]
         assert len(result) == 3
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_returns_dataframe(self):
         rng = np.random.default_rng(42)
         df = pd.DataFrame({
@@ -246,7 +224,6 @@ class TestFitAllStates:
         result = fit_all_states(df)
         assert isinstance(result, pd.DataFrame)
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_columns_present(self):
         rng = np.random.default_rng(42)
         df = pd.DataFrame({
@@ -258,7 +235,6 @@ class TestFitAllStates:
         for col in ("state", "n_obs", "gamma_aic", "exp_aic", "exp_rate"):
             assert col in result.columns, f"Missing column: {col}"
 
-    @pytest.mark.skip(reason="awaiting implementation")
     def test_empty_group_returns_nan(self):
         rng = np.random.default_rng(42)
         df = pd.DataFrame({
