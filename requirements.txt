@@ -1,15 +1,26 @@
-scanpy
-anndata
-leidenalg
-python-igraph
-lifelines
-scipy
-statsmodels
-numpy
-pandas
-networkx
-matplotlib
-seaborn
-plotly
-pytest
-jupyter
+# Data handling: single-cell data structures, clustering, and tabular/numerical arrays
+scanpy==1.12.2
+anndata==0.12.19
+leidenalg==0.12.0
+igraph==1.0.0
+numpy==2.5.1
+pandas==3.0.3
+
+# Statistics: distribution fitting (gamma/exponential MLE), survival analysis, AIC/BIC/LRT model comparison
+lifelines==0.30.3
+scipy==1.18.0
+statsmodels==0.14.6
+
+# Network / graph: queueing network topology, routing, and traffic analysis
+networkx==3.6.1
+
+# Visualization: publication-ready paper and poster figures
+matplotlib==3.11.0
+seaborn==0.13.2
+plotly==6.9.0
+
+# Testing: unit-testing the pipeline before trusting it on real data
+pytest==9.1.1
+
+# Development: exploratory notebooks and interactive diagnostics
+jupyter==1.1.1
