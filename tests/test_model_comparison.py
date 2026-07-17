@@ -235,9 +235,47 @@ class TestIdentifySignificantBottlenecks:
         assert len(result) == 2
         assert set(result["state"]) == {1, 2}
 
-    @pytest.mark.skip(reason="requires end-to-end pipeline: generate hierarchy → simulate → fit → compare")
     def test_end_to_end_bottleneck_detection_on_synthetic_data(self):
-        pass
+        from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
+        from queuediff.distribution_fitting import fit_all_states
+        from queuediff.model_comparison import compare_all_states, apply_fdr_correction, identify_significant_bottlenecks
+
+        # Create hierarchy with bottleneck at state 1
+        hierarchy = generate_hierarchy(
+            n_states=5,
+            branching_structure={1: [2, 3], 2: [4]},
+            seed=42
+        )
+
+        gamma_params = {
+            0: (2.0, 1.0),
+            1: (2.0, 1.5),  # bottleneck state, true shape=2.0
+            2: (3.0, 1.0),
+            3: (2.0, 2.0),
+            4: (4.0, 1.0),
+        }
+
+        # Simulate with strong bottleneck at state 1
+        df = simulate_cells(
+            hierarchy=hierarchy,
+            n_cells=2000,
+            gamma_params_per_state=gamma_params,
+            bottleneck_state=1,
+            bottleneck_severity=3.0,  # inflates shape to 6.0
+            seed=123
+        )
+
+        # Full pipeline
+        fit_df = fit_all_states(df)
+        comparison_df = compare_all_states(fit_df)
+        corrected_df = apply_fdr_correction(comparison_df, alpha=0.05)
+        bottlenecks = identify_significant_bottlenecks(corrected_df, alpha=0.05)
+
+        # Bottleneck state 1 should be detected
+        assert len(bottlenecks) >= 1
+        assert 1 in bottlenecks["state"].values
+        # State 1 should have the largest effect size (delta_aic)
+        assert bottlenecks.iloc[0]["state"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -245,10 +283,73 @@ class TestIdentifySignificantBottlenecks:
 # ---------------------------------------------------------------------------
 
 class TestIntegrationWithDistributionFitting:
-    @pytest.mark.skip(reason="awaiting full pipeline integration test")
     def test_full_pipeline_synthetic_bottleneck_recovery(self):
-        pass
+        from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
+        from queuediff.distribution_fitting import fit_all_states
+        from queuediff.model_comparison import compare_all_states, apply_fdr_correction, identify_significant_bottlenecks
 
-    @pytest.mark.skip(reason="awaiting full pipeline integration test")
+        hierarchy = generate_hierarchy(
+            n_states=5,
+            branching_structure={1: [2, 3], 2: [4]},
+            seed=42
+        )
+
+        gamma_params = {
+            0: (2.0, 1.0),
+            1: (2.0, 1.5),
+            2: (3.0, 1.0),
+            3: (2.0, 2.0),
+            4: (4.0, 1.0),
+        }
+
+        # With bottleneck
+        df = simulate_cells(
+            hierarchy=hierarchy,
+            n_cells=2000,
+            gamma_params_per_state=gamma_params,
+            bottleneck_state=1,
+            bottleneck_severity=3.0,
+            seed=123
+        )
+
+        fit_df = fit_all_states(df)
+        comparison_df = compare_all_states(fit_df)
+        corrected_df = apply_fdr_correction(comparison_df, alpha=0.05)
+        bottlenecks = identify_significant_bottlenecks(corrected_df, alpha=0.05)
+
+        # Bottleneck state should be flagged
+        assert 1 in bottlenecks["state"].values
+        # Should have the largest delta_aic
+        assert bottlenecks.iloc[0]["state"] == 1
+
     def test_full_pipeline_fdr_control_on_null_data(self):
-        pass
+        from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
+        from queuediff.distribution_fitting import fit_all_states
+        from queuediff.model_comparison import compare_all_states, apply_fdr_correction
+
+        hierarchy = generate_hierarchy(
+            n_states=5,
+            branching_structure={1: [2, 3], 2: [4]},
+            seed=42
+        )
+
+        # All states exponential (shape=1.0) - null hypothesis true everywhere
+        exp_params = {s: (1.0, 1.0) for s in range(5)}
+
+        df = simulate_cells(
+            hierarchy=hierarchy,
+            n_cells=2000,
+            gamma_params_per_state=exp_params,
+            bottleneck_state=1,
+            bottleneck_severity=1.0,  # No bottleneck
+            seed=456
+        )
+
+        fit_df = fit_all_states(df)
+        comparison_df = compare_all_states(fit_df)
+        corrected_df = apply_fdr_correction(comparison_df, alpha=0.05)
+
+        # FDR should control false positives
+        n_significant = corrected_df["significant"].sum()
+        # With 5 states at alpha=0.05, expect at most 1 false positive typically
+        assert n_significant <= 1
