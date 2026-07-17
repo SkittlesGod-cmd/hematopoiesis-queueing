@@ -45,7 +45,6 @@ class TestFitGamma:
         with pytest.raises(ValueError, match="Need at least 10 observations"):
             fit_gamma(np.array([5.0, 6.0, 7.0, 8.0, 9.0]))  # only 5 points
 
-    @pytest.mark.skip(reason="edge case behavior differs from implementation: we don't handle NaN in input")
     def test_handles_nan_in_input(self):
         rng = np.random.default_rng(42)
         data = rng.gamma(shape=2.0, scale=1.0, size=100)
@@ -89,7 +88,6 @@ class TestFitExponential:
         with pytest.raises(ValueError, match="Need at least 10 observations"):
             fit_exponential(np.array([5.0, 6.0, 7.0, 8.0, 9.0]))  # only 5 points
 
-    @pytest.mark.skip(reason="edge case behavior differs from implementation: we don't handle NaN in input")
     def test_handles_nan_in_input(self):
         rng = np.random.default_rng(42)
         data = rng.exponential(scale=1.0, size=100)
