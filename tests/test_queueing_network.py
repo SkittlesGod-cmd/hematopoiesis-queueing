@@ -23,13 +23,13 @@ import pytest
 
 
 class TestQueueingNetworkEmpty:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_empty_network_has_no_states(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
         assert qn.states == []
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_empty_network_routing_matrix_is_empty(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -38,7 +38,7 @@ class TestQueueingNetworkEmpty:
 
 
 class TestQueueingNetworkAddState:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_add_single_state(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -46,21 +46,21 @@ class TestQueueingNetworkAddState:
         assert "HSC" in qn.states
         assert len(qn.states) == 1
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_service_rate_stored(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
         qn.add_state("HSC", service_rate=2.5, servers=1)
         assert qn.graph.nodes["HSC"]["service_rate"] == 2.5
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_default_servers_is_one(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
         qn.add_state("HSC", service_rate=1.0)
         assert qn.graph.nodes["HSC"]["servers"] == 1
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_add_multiple_states(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -70,7 +70,7 @@ class TestQueueingNetworkAddState:
 
 
 class TestQueueingNetworkAddTransition:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_add_transition(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -79,7 +79,7 @@ class TestQueueingNetworkAddTransition:
         qn.add_transition("HSC", "MPP", probability=1.0)
         assert qn.graph.has_edge("HSC", "MPP")
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_transition_probability_stored(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -88,7 +88,7 @@ class TestQueueingNetworkAddTransition:
         qn.add_transition("MPP", "CMP", probability=0.5)
         assert qn.graph.edges[("MPP", "CMP")]["probability"] == 0.5
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_total_probability_may_be_one(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -103,7 +103,7 @@ class TestQueueingNetworkAddTransition:
 
 
 class TestQueueingNetworkRoutingMatrix:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_shape(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -115,7 +115,7 @@ class TestQueueingNetworkRoutingMatrix:
         assert mat.shape == (3, 3)
         assert list(mat.index) == ["HSC", "MPP", "CMP"]
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_zero_for_no_edge(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -126,7 +126,7 @@ class TestQueueingNetworkRoutingMatrix:
 
 
 class TestQueueingNetworkArrivalRates:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_external_arrival_set_on_source(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -136,7 +136,7 @@ class TestQueueingNetworkArrivalRates:
         rates = qn.arrival_rates(external_arrival=10.0, source="HSC")
         assert rates["HSC"] == 10.0
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_arrival_propagates_downstream(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -146,7 +146,7 @@ class TestQueueingNetworkArrivalRates:
         rates = qn.arrival_rates(external_arrival=5.0, source="HSC")
         assert abs(rates["MPP"] - 5.0) < 1e-12
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_split_routing(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -159,7 +159,7 @@ class TestQueueingNetworkArrivalRates:
         assert abs(rates["CMP"] - 4.0) < 1e-12
         assert abs(rates["LMPP"] - 6.0) < 1e-12
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_no_source_returns_zeros(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -167,7 +167,7 @@ class TestQueueingNetworkArrivalRates:
         rates = qn.arrival_rates()
         assert rates["HSC"] == 0.0
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_all_arrival_rates_non_negative(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -182,7 +182,7 @@ class TestQueueingNetworkArrivalRates:
 
 
 class TestQueueingNetworkTrafficIntensity:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_rho_non_negative(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -191,7 +191,7 @@ class TestQueueingNetworkTrafficIntensity:
         rho = qn.traffic_intensity(rates)
         assert rho["HSC"] >= 0.0
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_stable_state_rho_less_than_one(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -203,7 +203,7 @@ class TestQueueingNetworkTrafficIntensity:
         assert rho["HSC"] < 1.0, f"HSC ρ={rho['HSC']:.3f} should be < 1"
         assert rho["MPP"] < 1.0, f"MPP ρ={rho['MPP']:.3f} should be < 1"
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_unstable_state_rho_greater_than_one(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -215,7 +215,7 @@ class TestQueueingNetworkTrafficIntensity:
             "when λ=1.0 and μ=0.5"
         )
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_rho_formula(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -227,7 +227,7 @@ class TestQueueingNetworkTrafficIntensity:
             f"ρ should equal λ/(c·μ) = {expected}, got {rho['Test']}"
         )
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_zero_service_rate_returns_inf(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -238,7 +238,7 @@ class TestQueueingNetworkTrafficIntensity:
 
 
 class TestQueueingNetworkSummary:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_returns_dataframe(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -247,7 +247,7 @@ class TestQueueingNetworkSummary:
         df = qn.summary()
         assert isinstance(df, pd.DataFrame)
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_columns_present(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -257,7 +257,7 @@ class TestQueueingNetworkSummary:
                      "traffic_intensity"):
             assert col in df.columns, f"Missing column: {col}"
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_one_row_per_state(self):
         from queuediff.queueing_network import QueueingNetwork
         qn = QueueingNetwork()
@@ -272,7 +272,7 @@ class TestQueueingNetworkSummary:
 # ---------------------------------------------------------------------------
 
 class TestBuildFromData:
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_returns_QueueingNetwork(self):
         from queuediff.queueing_network import build_from_data
         service_rates = {"HSC": 1.0, "MPP": 2.0}
@@ -281,20 +281,20 @@ class TestBuildFromData:
         from queuediff.queueing_network import QueueingNetwork
         assert isinstance(qn, QueueingNetwork)
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_name_set(self):
         from queuediff.queueing_network import build_from_data
         qn = build_from_data({"HSC": 1.0}, {}, name="my_network")
         assert qn.name == "my_network"
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_states_from_service_rates(self):
         from queuediff.queueing_network import build_from_data
         service_rates = {"HSC": 1.0, "MPP": 2.0, "CMP": 3.0}
         qn = build_from_data(service_rates, {}, name="test")
         assert set(qn.states) == {"HSC", "MPP", "CMP"}
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_transitions_added(self):
         from queuediff.queueing_network import build_from_data
         qn = build_from_data(
@@ -303,7 +303,7 @@ class TestBuildFromData:
         )
         assert qn.graph.has_edge("HSC", "MPP")
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_missing_service_rate_defaults_to_zero(self):
         from queuediff.queueing_network import build_from_data
         qn = build_from_data(
@@ -313,7 +313,7 @@ class TestBuildFromData:
         assert "MPP" in qn.states
         assert qn.graph.nodes["MPP"]["service_rate"] == 0.0
 
-    @pytest.mark.skip(reason="awaiting implementation")
+    
     def test_missing_routing_state_added(self):
         from queuediff.queueing_network import build_from_data
         qn = build_from_data(

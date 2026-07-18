@@ -21,7 +21,7 @@ from pathlib import Path
 import sys
 
 RESULTS_DIR = Path("results")
-DATA_DIR = Path("data/raw/weinreb")
+DATA_DIR = Path("scripts/data/raw/weinreb")
 
 
 def main() -> None:
@@ -73,7 +73,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("[2/9] Assigning states …")
     try:
-        from queuediff.state_discretization import run as run_state_discretization
+        from queuediff.state_discretization import run_from_adata as run_state_discretization
 
         adata = run_state_discretization(
             adata,
@@ -115,8 +115,11 @@ def main() -> None:
 
         clonal_res_df = estimate_residence_times(
             adata,
+            clone_matrix_path=DATA_DIR / "stateFate_inVitro_clone_matrix.mtx.gz",
+            metadata_path=DATA_DIR / "stateFate_inVitro_metadata.txt.gz",
             state_col="marker_state",
             time_col="timepoint",
+            already_preprocessed=True,
         )
     except Exception as exc:
         print(f"  FAILED clonal residence time estimation: {exc}", file=sys.stderr)

@@ -237,8 +237,7 @@ if __name__ == "__main__":
         assign_marker_states,
         MARKER_GENES,
     )
-    from scipy.io import mmread
-    import gzip
+    from queuediff.data_loading import load_weinreb_from_files as load_weinreb
 
     # Data paths (reuse what exists in scripts/data/)
     base_path = Path("scripts/data/raw/weinreb")
@@ -252,18 +251,8 @@ if __name__ == "__main__":
 
     print(f"Loading Weinreb data from {base_path}...")
 
-    # Load normalized counts matrix (appears to be cells × genes already)
-    X = mmread(gzip.open(counts_path, "rt")).tocsr()  # NO transpose - already cells × genes
-    with gzip.open(genes_path, "rt") as f:
-        gene_names = [line.strip() for line in f]
-    meta = pd.read_csv(gzip.open(meta_path, "rt"), sep="\t", index_col=0)
-
-    # Build AnnData: X is (n_cells, n_genes), var_names are genes
-    adata = sc.AnnData(X=X.astype(np.float32))
-    adata.var_names = gene_names
-    adata.var_names_make_unique()
-    adata.obs = meta
-    adata.obs_names_make_unique()
+    # Load using consolidated data_loading module (NO transpose - already cells × genes)
+    adata = load_weinreb(counts_path, genes_path, meta_path)
     print(f"  Loaded {adata.n_obs} cells × {adata.n_vars} genes")
 
     # SUBSAMPLE FIRST (before expensive preprocessing)
@@ -275,8 +264,8 @@ if __name__ == "__main__":
         print(f"  Subsampled to {adata.n_obs} cells (seed=42)")
 
     # Preprocess
-    print("Running standard preprocessing (filter, normalize, log1p, HVG, scale, PCA)...")
-    adata = preprocess_standard(adata, min_genes=200, min_cells=3, n_top_genes=2000, n_pcs=30)
+    print("Running standard preprocessing (filter, log1p, HVG, scale, PCA)...")
+    adata = preprocess_standard(adata, min_genes=200, min_cells=3, n_top_genes=2000, n_pcs=30, already_normalized=True)
     print(f"  After filtering: {adata.n_obs} cells × {adata.n_vars} genes")
 
     # Marker state assignment
@@ -333,3 +322,56 @@ if __name__ == "__main__":
           f"(range {summary['concordance_range']:.3f} "
           f"{'< 0.15' if summary['is_stable'] else '>= 0.15'})")
     print("=" * 70)
+
+    # ------------------------------------------------------------
+    # DIAGNOSTIC: Meis1 presence at different n_top_genes values
+    # ------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("DIAGNOSTIC: Meis1 HVG inclusion at different n_top_genes")
+    print("=" * 70)
+    print("\nTesting Meis1 presence in HVG subset at different n_top_genes...")
+    print("Note: This is a DIAGNOSTIC ONLY - does not affect main sweep.\n")
+
+    base_path = Path("scripts/data/raw/weinreb")
+    counts_path = base_path / "stateFate_inVitro_normed_counts.mtx.gz"
+    genes_path = base_path / "stateFate_inVitro_gene_names.txt.gz"
+    meta_path = base_path / "stateFate_inVitro_metadata.txt.gz"
+
+    for n_genes in [2000, 3000, 5000]:
+        # Load fresh data for each test using consolidated loader
+        adata = load_weinreb(counts_path, genes_path, meta_path)
+
+        # Subsample
+        SUBSAMPLE_N = 15000
+        rng = np.random.default_rng(42)
+        if adata.n_obs > SUBSAMPLE_N:
+            idx = rng.choice(adata.n_obs, SUBSAMPLE_N, replace=False)
+            adata = adata[idx].copy()
+
+        # Preprocess with specific n_top_genes
+        adata = preprocess_standard(adata, min_genes=200, min_cells=3,
+                                     n_top_genes=n_genes, n_pcs=30,
+                                     already_normalized=True)
+
+        meis1_present = "Meis1" in adata.var_names
+        if meis1_present:
+            # Check if highly_variable column exists and get rank/dispersion
+            if "highly_variable" in adata.var.columns:
+                hvg_rank = adata.var.loc[adata.var.highly_variable].shape[0]
+                # Get Meis1's rank among HVGs
+                if "Meis1" in adata.var_names:
+                    meis1_idx = list(adata.var_names).index("Meis1")
+                    # Check dispersion/rank if available
+                    meis1_row = adata.var.iloc[meis1_idx]
+                    hvg_status = meis1_row.get("highly_variable", False)
+                    print(f"  n_top_genes={n_genes}: Meis1 PRESENT in HVG subset (highly_variable={hvg_status})")
+                    # Print dispersion/rank if available
+                    for col in ["dispersions", "dispersions_norm", "means", "dispersions_norm_rank", "highly_variable_rank"]:
+                        if col in meis1_row.index:
+                            print(f"    {col}: {meis1_row[col]}")
+                else:
+                    print(f"  n_top_genes={n_genes}: Meis1 PRESENT in HVG subset (no HVG rank info available)")
+        else:
+            print(f"  n_top_genes={n_genes}: Meis1 ABSENT from HVG subset")
+
+    print("\n" + "=" * 70)

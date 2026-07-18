@@ -15,6 +15,7 @@ venv/
 # Data (raw and processed are too large or not to be committed)
 data/raw/
 data/processed/
+scripts/data/
 
 # macOS
 .DS_Store
