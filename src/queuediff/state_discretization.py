@@ -112,24 +112,36 @@ def preprocess_standard(
     n_top_genes: int = 2000,
     n_pcs: int = 30,
 ) -> sc.AnnData:
-    """Run standard single-cell preprocessing.
+    """Run standard single-cell preprocessing for log-normalized input data.
+
+    The Weinreb stateFate_inVitro dataset ships as normed_counts (already
+    library-size normalised, but unlogged). This function assumes the input
+    is raw counts OR already normalised counts. The pipeline below matches
+    Scanpy's recommended order for flavor='seurat' (designed for
+    log-normalised data):
 
     Steps:
         1. Filter cells with fewer than *min_genes* detected.
         2. Filter genes detected in fewer than *min_cells*.
-        3. Select *n_top_genes* highly variable genes on RAW COUNTS
-           (required for flavor='seurat_v3').
-        4. Subset to HVGs.
-        5. Total-count normalise to 10,000 per cell.
-        6. Log1p transform.
-        7. Convert to dense array (HVG subset is small: ~2000 genes).
-        8. Scale to unit variance (clip at 10).
-        9. Run PCA (*n_pcs* components).
+        3. Total-count normalise to 10,000 per cell.
+        4. Log1p transform.
+        5. Select *n_top_genes* highly variable genes using flavor='seurat'
+           on the log-normalised data.
+        6. Subset to HVGs.
+        7. Store a copy of the log-normalised HVG matrix in
+           adata.layers['lognorm'] for marker-gene scoring.
+        8. Convert to dense array (HVG subset is small: ~2000 genes).
+        9. Scale to unit variance (clip at 10).
+       10. Run PCA (*n_pcs* components).
+
+    The scaled/clipped adata.X is used only for PCA and downstream
+    Leiden clustering. Marker-gene scoring (sc.tl.score_genes) must use
+    the log-normalised values in adata.layers['lognorm'].
 
     Parameters
     ----------
     adata
-        Raw count AnnData (cells × genes).
+        AnnData with count data (raw or pre-normalised).
     min_genes
         Minimum number of genes that must be detected in a cell.
     min_cells
@@ -145,13 +157,17 @@ def preprocess_standard(
     """
     sc.pp.filter_cells(adata, min_genes=min_genes)
     sc.pp.filter_genes(adata, min_cells=min_cells)
-    # HVG selection on raw counts (seurat_v3 requires raw counts)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, flavor="seurat_v3")
-    adata = adata[:, adata.var.highly_variable].copy()
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
-    # Explicit dense conversion for HVG subset (~2000 genes) to avoid
-    # silent sparse densification warning during scaling
+    # HVG selection on log-normalised data (flavor='seurat')
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, flavor="seurat")
+    adata = adata[:, adata.var.highly_variable].copy()
+    # Store log-normalised HVG matrix for marker-gene scoring
+    if hasattr(adata.X, "toarray"):
+        adata.layers["lognorm"] = adata.X.toarray()
+    else:
+        adata.layers["lognorm"] = adata.X.copy()
+    # Dense conversion for HVG subset (~2000 genes) before scaling
     if hasattr(adata.X, "toarray"):
         adata.X = adata.X.toarray()
     sc.pp.scale(adata, max_value=10)
@@ -208,7 +224,8 @@ def score_marker_states(
     Parameters
     ----------
     adata
-        AnnData with log-normalised expression in ``.X``.
+        AnnData with log-normalised expression in ``.layers['lognorm']``
+        (or ``.X`` if the layer is missing).
     marker_genes
         Dict mapping state name → list of marker gene symbols.
         Defaults to :py:data:`MARKER_GENES`.
@@ -222,6 +239,11 @@ def score_marker_states(
     if marker_genes is None:
         marker_genes = MARKER_GENES
 
+    # Use lognorm layer for scoring; preserve original X
+    orig_X = adata.X
+    if "lognorm" in adata.layers:
+        adata.X = adata.layers["lognorm"]
+
     scores = {}
     for state, genes in marker_genes.items():
         col = score_prefix + state
@@ -232,6 +254,9 @@ def score_marker_states(
         sc.tl.score_genes(adata, gene_list=present, score_name=col, random_state=0)
         scores[state] = adata.obs[col].values.copy()
         del adata.obs[col]
+
+    # Restore original X
+    adata.X = orig_X
 
     return pd.DataFrame(scores, index=adata.obs_names)
 
