@@ -214,6 +214,7 @@ def score_marker_states(
     adata: sc.AnnData,
     marker_genes: dict[str, list[str]] | None = None,
     score_prefix: str = "score_",
+    layer: str = "lognorm",
 ) -> pd.DataFrame:
     """Score every cell against every marker-gene state panel.
 
@@ -224,13 +225,15 @@ def score_marker_states(
     Parameters
     ----------
     adata
-        AnnData with log-normalised expression in ``.layers['lognorm']``
-        (or ``.X`` if the layer is missing).
+        AnnData with log-normalised expression in the specified layer.
     marker_genes
         Dict mapping state name → list of marker gene symbols.
         Defaults to :py:data:`MARKER_GENES`.
     score_prefix
         Prefix for the temporary score column inserted into ``adata.obs``.
+    layer
+        Layer in ``adata.layers`` containing log-normalised expression
+        (e.g., "lognorm"). Must exist; raises ValueError if missing.
 
     Returns
     -------
@@ -239,10 +242,13 @@ def score_marker_states(
     if marker_genes is None:
         marker_genes = MARKER_GENES
 
-    # Use lognorm layer for scoring; preserve original X
-    orig_X = adata.X
-    if "lognorm" in adata.layers:
-        adata.X = adata.layers["lognorm"]
+    # Validate that the requested layer exists
+    if layer not in adata.layers:
+        raise ValueError(
+            f"Layer '{layer}' not found in adata.layers. "
+            f"Available layers: {list(adata.layers.keys())}. "
+            f"Run preprocess_standard first to create the 'lognorm' layer."
+        )
 
     scores = {}
     for state, genes in marker_genes.items():
@@ -251,12 +257,11 @@ def score_marker_states(
         if not present:
             scores[state] = np.zeros(adata.n_obs)
             continue
-        sc.tl.score_genes(adata, gene_list=present, score_name=col, random_state=0)
+        # Use the specified layer directly via scanpy's layer parameter
+        sc.tl.score_genes(adata, gene_list=present, score_name=col,
+                          random_state=0, layer=layer)
         scores[state] = adata.obs[col].values.copy()
         del adata.obs[col]
-
-    # Restore original X
-    adata.X = orig_X
 
     return pd.DataFrame(scores, index=adata.obs_names)
 
@@ -265,24 +270,28 @@ def assign_marker_states(
     adata: sc.AnnData,
     marker_genes: dict[str, list[str]] | None = None,
     key_added: str = "marker_state",
+    layer: str = "lognorm",
 ) -> sc.AnnData:
     """Assign each cell to its highest-scoring marker-defined state.
 
     Parameters
     ----------
     adata
-        AnnData with log-normalised expression in ``.X``.
+        AnnData with log-normalised expression in the specified layer.
     marker_genes
         Dict mapping state name → marker gene list.
         Defaults to :py:data:`MARKER_GENES`.
     key_added
         Column name in ``adata.obs`` for the assigned state.
+    layer
+        Layer in ``adata.layers`` containing log-normalised expression.
+        Defaults to "lognorm".
 
     Returns
     -------
     The same AnnData with ``adata.obs[key_added]`` added.
     """
-    scores = score_marker_states(adata, marker_genes)
+    scores = score_marker_states(adata, marker_genes, layer=layer)
     adata.obs[key_added] = scores.idxmax(axis=1).astype("category")
     return adata
 
