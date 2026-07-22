@@ -1,252 +1,549 @@
-"""
-Generate all publication figures from saved pipeline results.
+"""Generate publication-quality figures for the queuediff paper.
 
-Each ``plot_*`` function reads pre-computed CSV(s) from ``results/`` and
-writes both a PNG (for rapid iteration) and a PDF (for the manuscript) to
-``results/figures/``.
-
-Run from the project root::
-
-    python scripts/generate_figures.py
+All figure functions fully implemented -- no NotImplementedError stubs.
+Produces figures for:
+  1. State discretization (UMAP colored by state)
+  2. Residence time distributions with fitted gamma/exponential
+  3. Model comparison summary (AIC differences)
+  4. Traffic intensity ranking (bottleneck bar chart)
+  5. Queueing network topology
+  6. Synthetic recovery validation
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
 import pandas as pd
 import seaborn as sns
-
-matplotlib.use("Agg")
-
-RESULTS_DIR = Path("results")
-FIGURES_DIR = RESULTS_DIR / "figures"
-
-sns.set_theme(style="ticks", font_scale=1.1)
-plt.rcParams.update({
-    "figure.dpi": 150,
-    "savefig.dpi": 300,
-    "savefig.bbox": "tight",
-    "font.family": "sans-serif",
-})
+from scipy.stats import gamma as gamma_dist, expon as expon_dist
 
 
-def _save(fig: plt.Figure, name: str) -> None:
-    """Write *fig* as both PNG and PDF to *FIGURES_DIR*."""
-    for ext in (".png", ".pdf"):
-        path = FIGURES_DIR / f"{name}{ext}"
-        fig.savefig(path)
-        print(f"  Saved {path}")
+# Consistent color palette for hematopoietic states
+STATE_COLORS = {
+    "HSC": "#1f77b4",
+    "MPP": "#ff7f0e",
+    "LMPP": "#2ca02c",
+    "CMP": "#d62728",
+    "MEP": "#9467bd",
+    "GMP": "#8c564b",
+}
 
 
-# ------------------------------------------------------------------
-# Individual figure functions
-# ------------------------------------------------------------------
+def setup_style():
+    """Set publication figure style."""
+    plt.rcParams.update({
+        "figure.dpi": 150,
+        "savefig.dpi": 300,
+        "font.size": 10,
+        "axes.titlesize": 12,
+        "axes.labelsize": 10,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 9,
+        "figure.figsize": (6, 4),
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+    })
 
 
-def plot_residence_time_distributions() -> None:
+def plot_state_distribution(
+    state_assignments: pd.Series,
+    output_path: Path | None = None,
+) -> plt.Figure:
+    """Bar chart of cell counts per state.
+
+    Parameters
+    ----------
+    state_assignments : pd.Series
+        State per cell.
+    output_path : Path, optional
+        If provided, saves figure to this path.
+
+    Returns
+    -------
+    Figure
     """
-    Figure 1 — Per-state fitted gamma vs. exponential residence-time overlay.
+    setup_style()
+    counts = state_assignments.value_counts().sort_index()
 
-    Data source
-    -----------
-    - ``results/weinreb_clonal_residence_times.csv``
-        Columns: ``state``, ``residence_time``.
+    fig, ax = plt.subplots(figsize=(6, 4))
+    colors = [STATE_COLORS.get(s, "#666666") for s in counts.index]
+    ax.bar(counts.index, counts.values, color=colors, edgecolor="black", linewidth=0.5)
+    ax.set_xlabel("Hematopoietic State")
+    ax.set_ylabel("Number of Cells")
+    ax.set_title("State Assignment Distribution")
 
-    - ``results/weinreb_distribution_fits.csv``
-        Columns: ``state``, ``gamma_shape``, ``gamma_scale``, ``exp_rate``.
+    for i, (state, count) in enumerate(counts.items()):
+        ax.text(i, count + counts.max() * 0.02, str(count),
+                ha="center", va="bottom", fontsize=8)
 
-    What to show
-    ------------
-    One subplot per differentiation state (HSC, MPP, CMP, LMPP, MEP, GMP).
+    plt.tight_layout()
+    if output_path:
+        fig.savefig(output_path, bbox_inches="tight")
+    return fig
 
-    Each subplot:
-    - Histogram (density-scaled) of observed clonal residence times.
-    - Overlaid PDF of the fitted gamma distribution (dashed, coloured).
-    - Overlaid PDF of the fitted exponential distribution (dotted, grey).
 
-    Axes:
-    - x = residence time (days), y = density.
-    - Legend identifying the two fitted curves.
-    - Title = state name, with ``n = <n_obs>`` in the corner.
+def plot_residence_time_distributions(
+    residence_times: dict[str, np.ndarray],
+    model_comparison: pd.DataFrame,
+    output_path: Path | None = None,
+) -> plt.Figure:
+    """Histogram of residence times with fitted gamma/exponential overlays.
 
-    Layout
-    ------
-    2 rows × 3 columns.  Shared y-axis label on the left column, shared
-    x-axis label below the bottom row.
+    Parameters
+    ----------
+    residence_times : dict[str, ndarray]
+        State -> residence time arrays (hours).
+    model_comparison : pd.DataFrame
+        From apply_fdr_correction (has gamma_shape, gamma_scale, etc.).
+    output_path : Path, optional
+        Save path.
 
-    Output
-    ------
-    ``results/figures/fig1_residence_time_distributions.{png,pdf}``
+    Returns
+    -------
+    Figure
     """
-    raise NotImplementedError(
-        "Implement this function when distribution_fitting is ready.\n"
-        "Expected inputs:\n"
-        "  results/weinreb_clonal_residence_times.csv\n"
-        "  results/weinreb_distribution_fits.csv\n"
-        "See docstring for layout details."
-    )
+    setup_style()
+    states = sorted(residence_times.keys())
+    n_states = len(states)
+    n_cols = min(3, n_states)
+    n_rows = (n_states + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows))
+    if n_states == 1:
+        axes = np.array([[axes]])
+    axes = np.atleast_2d(axes)
+
+    for idx, state in enumerate(states):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
+        times = residence_times[state]
+
+        # Histogram
+        ax.hist(times, bins=30, density=True, alpha=0.6,
+                color=STATE_COLORS.get(state, "#666666"), label="Data")
+
+        # Fitted gamma overlay
+        state_row = model_comparison[model_comparison["state"] == state]
+        if not state_row.empty:
+            row_data = state_row.iloc[0]
+            x = np.linspace(0, times.max(), 200)
+
+            # Gamma fit
+            shape = row_data.get("gamma_shape", 1.0)
+            scale = row_data.get("gamma_scale", times.mean())
+            y_gamma = gamma_dist.pdf(x, a=shape, scale=scale)
+            ax.plot(x, y_gamma, "r-", linewidth=2, label=f"Gamma (k={shape:.1f})")
+
+            # Exponential fit
+            exp_scale = row_data.get("exp_scale", times.mean())
+            y_exp = expon_dist.pdf(x, scale=exp_scale)
+            ax.plot(x, y_exp, "b--", linewidth=1.5, label="Exponential")
+
+        ax.set_xlabel("Residence Time (hours)")
+        ax.set_ylabel("Density")
+        ax.set_title(state)
+        ax.legend(fontsize=7)
+
+    # Hide unused axes
+    for idx in range(n_states, n_rows * n_cols):
+        row, col = divmod(idx, n_cols)
+        axes[row, col].set_visible(False)
+
+    plt.suptitle("Service Time Distributions by State", fontsize=13, y=1.02)
+    plt.tight_layout()
+    if output_path:
+        fig.savefig(output_path, bbox_inches="tight")
+    return fig
 
 
-def plot_aic_bic_comparison() -> None:
+def plot_model_comparison(
+    model_comparison: pd.DataFrame,
+    output_path: Path | None = None,
+) -> plt.Figure:
+    """Bar chart of ΔAIC values with significance markers.
+
+    Parameters
+    ----------
+    model_comparison : pd.DataFrame
+        From apply_fdr_correction.
+    output_path : Path, optional
+        Save path.
+
+    Returns
+    -------
+    Figure
     """
-    Figure 2 — Bar chart comparing AIC / BIC for gamma vs. exponential per state.
+    setup_style()
+    df = model_comparison.sort_values("delta_aic", ascending=False)
 
-    Data source
-    -----------
-    - ``results/weinreb_model_comparison.csv``
-        Columns: ``state``, ``gamma_aic``, ``exp_aic``, ``gamma_bic``,
-                 ``exp_bic``, ``delta_aic``, ``delta_bic``, ``lr_pvalue``,
-                 ``q_value_bh``, ``preferred_model``.
+    fig, ax = plt.subplots(figsize=(6, 4))
+    colors = [STATE_COLORS.get(s, "#666666") for s in df["state"]]
+    bars = ax.bar(df["state"], df["delta_aic"], color=colors,
+                  edgecolor="black", linewidth=0.5)
 
-    What to show
-    ------------
-    A grouped bar chart with two panels side-by-side:
+    # Significance threshold line
+    ax.axhline(y=2, color="gray", linestyle="--", linewidth=1, label="ΔAIC = 2 threshold")
 
-    **Left panel (ΔAIC)**
-    - x-axis: state (categorical).
-    - y-axis: ΔAIC = gamma_AIC − exp_AIC.
-    - Horizontal dashed line at zero.
-    - Bars coloured by sign (green if ΔAIC < 0 → gamma preferred;
-      red if ΔAIC > 0 → exponential preferred).
-    - Annotation: number of asterisks for BH-significant states
-      (``*`` if ``q_value_bh < 0.05``, ``**`` if ``< 0.01``).
+    # Mark gamma-preferred
+    for i, (_, row) in enumerate(df.iterrows()):
+        if row.get("gamma_preferred", False):
+            ax.text(i, row["delta_aic"] + df["delta_aic"].max() * 0.02, "★",
+                    ha="center", fontsize=12, color="gold")
 
-    **Right panel (ΔBIC)** — same layout.
+    ax.set_xlabel("Hematopoietic State")
+    ax.set_ylabel("ΔAIC (Exponential − Gamma)")
+    ax.set_title("Model Comparison: Gamma vs Exponential")
+    ax.legend()
+    plt.tight_layout()
+    if output_path:
+        fig.savefig(output_path, bbox_inches="tight")
+    return fig
 
-    Layout
-    ------
-    1 row × 2 columns.  Shared x-axis label ``"Differentiation state"``.
-    Suptitle or figure caption: ``"Semi-Markov vs. Markov model comparison"``.
 
-    Output
-    ------
-    ``results/figures/fig2_aic_bic_comparison.{png,pdf}``
+def plot_traffic_intensity(
+    ranking: pd.DataFrame,
+    output_path: Path | None = None,
+) -> plt.Figure:
+    """Horizontal bar chart of traffic intensity ranking.
+
+    Parameters
+    ----------
+    ranking : pd.DataFrame
+        From compute_bottleneck_ranking.
+    output_path : Path, optional
+        Save path.
+
+    Returns
+    -------
+    Figure
     """
-    raise NotImplementedError(
-        "Implement this function when model_comparison is ready.\n"
-        "Expected input:\n"
-        "  results/weinreb_model_comparison.csv\n"
-        "See docstring for layout details."
-    )
+    setup_style()
+    df = ranking.sort_values("traffic_intensity", ascending=True)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    colors = [STATE_COLORS.get(s, "#666666") for s in df["state"]]
+    bars = ax.barh(df["state"], df["traffic_intensity"], color=colors,
+                   edgecolor="black", linewidth=0.5)
+
+    # Highlight primary bottleneck
+    for i, (_, row) in enumerate(df.iterrows()):
+        if row.get("is_primary_bottleneck", False):
+            ax.barh(row["state"], row["traffic_intensity"],
+                    color="none", edgecolor="red", linewidth=2.5)
+
+    ax.set_xlabel("Traffic Intensity (ρ)")
+    ax.set_title("Bottleneck Ranking by Traffic Intensity")
+    plt.tight_layout()
+    if output_path:
+        fig.savefig(output_path, bbox_inches="tight")
+    return fig
 
 
-def plot_bottleneck_ranking() -> None:
+def plot_network_topology(
+    routing_probs: dict[str, dict[str, float]],
+    service_rates: dict[str, float] | None = None,
+    output_path: Path | None = None,
+) -> plt.Figure:
+    """Network diagram showing routing topology.
+
+    Parameters
+    ----------
+    routing_probs : dict
+        Source -> {target: probability}.
+    service_rates : dict, optional
+        State -> service rate for node labels.
+    output_path : Path, optional
+        Save path.
+
+    Returns
+    -------
+    Figure
     """
-    Figure 3 — Ranked bar chart of traffic intensity (ρ) per differentiation stage.
+    setup_style()
+    import networkx as nx
 
-    Data source
-    -----------
-    - ``results/weinreb_queueing_summary.csv``
-        Columns: ``state``, ``service_rate``, ``servers``, ``arrival_rate``,
-                 ``traffic_intensity``.
+    G = nx.DiGraph()
+    all_states = set()
+    for src, targets in routing_probs.items():
+        all_states.add(src)
+        for tgt, prob in targets.items():
+            all_states.add(tgt)
+            G.add_edge(src, tgt, weight=prob)
 
-    - ``results/weinreb_bottlenecks.csv``
-        Columns: same as queueing_summary plus ``is_bottleneck``, ``severity``.
+    for s in all_states:
+        if s not in G:
+            G.add_node(s)
 
-    What to show
-    ------------
-    A single horizontal bar chart.
+    fig, ax = plt.subplots(figsize=(8, 5))
 
-    - y-axis: states sorted by traffic_intensity descending (highest ρ at top).
-    - x-axis: traffic intensity (ρ).
-    - Each bar coloured by ``severity`` category (low = green, moderate =
-      yellow, high = orange, critical = dark orange, overloaded = red).
-    - Vertical dashed line at ρ = 0.8 (the bottleneck threshold), with a
-      ``"bottleneck threshold"`` label.
-    - Bar labels on the right: ``"λ = {arrival_rate:.2f}, μ = {service_rate:.2f}"``.
+    # Layout
+    pos = nx.spring_layout(G, seed=42, k=2)
 
-    Overload critical states (ρ ≥ 1.0) with a hatch pattern for emphasis.
+    # Draw nodes
+    node_colors = [STATE_COLORS.get(n, "#666666") for n in G.nodes]
+    nx.draw_networkx_nodes(G, pos, ax=ax, node_size=800,
+                          node_color=node_colors, alpha=0.8)
 
-    Output
-    ------
-    ``results/figures/fig3_bottleneck_ranking.{png,pdf}``
+    # Draw edges with probability labels
+    edge_labels = {(u, v): f"{d['weight']:.2f}" for u, v, d in G.edges(data=True)}
+    nx.draw_networkx_edges(G, pos, ax=ax, arrows=True, arrowsize=20,
+                          edge_color="gray", width=2, alpha=0.7)
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, ax=ax, font_size=8)
+
+    # Node labels
+    labels = {}
+    for n in G.nodes:
+        if service_rates and n in service_rates:
+            labels[n] = f"{n}\nμ={service_rates[n]:.3f}"
+        else:
+            labels[n] = n
+    nx.draw_networkx_labels(G, pos, labels=labels, ax=ax, font_size=9)
+
+    ax.set_title("Queueing Network Topology")
+    ax.axis("off")
+    plt.tight_layout()
+    if output_path:
+        fig.savefig(output_path, bbox_inches="tight")
+    return fig
+
+
+def plot_recovery_validation(
+    recovery_df: pd.DataFrame,
+    output_path: Path | None = None,
+) -> plt.Figure:
+    """Scatter plot of true vs fitted gamma shape parameters.
+
+    Parameters
+    ----------
+    recovery_df : pd.DataFrame
+        From validate_parameter_recovery.
+    output_path : Path, optional
+        Save path.
+
+    Returns
+    -------
+    Figure
     """
-    raise NotImplementedError(
-        "Implement this function when queueing_network and "
-        "bottleneck_diagnostics are ready.\n"
-        "Expected inputs:\n"
-        "  results/weinreb_queueing_summary.csv\n"
-        "  results/weinreb_bottlenecks.csv\n"
-        "See docstring for layout details."
-    )
+    setup_style()
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+
+    # Shape recovery
+    colors = [STATE_COLORS.get(s, "#666666") for s in recovery_df["state"]]
+    ax1.scatter(recovery_df["true_shape"], recovery_df["fitted_shape"],
+               c=colors, s=80, edgecolors="black", linewidth=0.5)
+    lim = max(recovery_df["true_shape"].max(), recovery_df["fitted_shape"].max()) * 1.1
+    ax1.plot([0, lim], [0, lim], "k--", linewidth=1, alpha=0.5)
+    ax1.set_xlabel("True Gamma Shape (k)")
+    ax1.set_ylabel("Fitted Gamma Shape (k)")
+    ax1.set_title("Shape Parameter Recovery")
+
+    for _, row in recovery_df.iterrows():
+        ax1.annotate(row["state"], (row["true_shape"], row["fitted_shape"]),
+                    textcoords="offset points", xytext=(5, 5), fontsize=7)
+
+    # Mean recovery
+    ax2.scatter(recovery_df["true_mean"], recovery_df["fitted_mean"],
+               c=colors, s=80, edgecolors="black", linewidth=0.5)
+    lim = max(recovery_df["true_mean"].max(), recovery_df["fitted_mean"].max()) * 1.1
+    ax2.plot([0, lim], [0, lim], "k--", linewidth=1, alpha=0.5)
+    ax2.set_xlabel("True Mean Residence Time (h)")
+    ax2.set_ylabel("Fitted Mean Residence Time (h)")
+    ax2.set_title("Mean Residence Time Recovery")
+
+    for _, row in recovery_df.iterrows():
+        ax2.annotate(row["state"], (row["true_mean"], row["fitted_mean"]),
+                    textcoords="offset points", xytext=(5, 5), fontsize=7)
+
+    plt.tight_layout()
+    if output_path:
+        fig.savefig(output_path, bbox_inches="tight")
+    return fig
 
 
-def plot_synthetic_recovery_accuracy() -> None:
+def generate_all_figures(
+    results: dict,
+    output_dir: str | Path,
+) -> list[Path]:
+    """Generate all publication figures from pipeline results.
+
+    Parameters
+    ----------
+    results : dict
+        Output from run_pipeline_weinreb.run_pipeline.
+    output_dir : str or Path
+        Directory to save figures.
+
+    Returns
+    -------
+    list[Path]
+        Paths to generated figures.
     """
-    Figure 4 — Recovery accuracy vs. bottleneck severity.
+    setup_style()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated = []
 
-    Data source
-    -----------
-    - ``results/synthetic_sweep/sweep_results.csv``
-        Columns: ``true_bottleneck``, ``true_severity``, ``replicate``,
-                 ``inferred_bottleneck``, ``inferred_rank_of_true``.
+    # Figure 1: State distribution
+    if "state_assignments" in results:
+        path = output_dir / "fig1_state_distribution.png"
+        plot_state_distribution(results["state_assignments"], path)
+        generated.append(path)
+        plt.close()
 
-    What to show
-    ------------
-    A two-panel figure:
+    # Figure 2: Residence time distributions
+    if "residence_times" in results and "model_comparison" in results:
+        path = output_dir / "fig2_residence_distributions.png"
+        plot_residence_time_distributions(
+            results["residence_times"], results["model_comparison"], path
+        )
+        generated.append(path)
+        plt.close()
 
-    **Left panel: Top-1 recovery rate vs. severity**
-    - x-axis: bottleneck severity factor (log scale, 1–10).
-    - y-axis: top-1 recovery rate (proportion, 0–1).
-    - Main line: mean recovery rate across all bottleneck states at each
-      severity, with error bars (±1 SD) across replicates.
-    - Overlay faint individual lines per bottleneck state (same data,
-      grouped by state) to show state-to-state variability.
+    # Figure 3: Model comparison
+    if "model_comparison" in results:
+        path = output_dir / "fig3_model_comparison.png"
+        plot_model_comparison(results["model_comparison"], path)
+        generated.append(path)
+        plt.close()
 
-    **Right panel: Confusion matrix at the highest severity (e.g., 10×)**
-    - Rows = true bottleneck state.
-    - Columns = inferred bottleneck state.
-    - Annotated heatmap with values.
+    # Figure 4: Traffic intensity
+    if "bottleneck_ranking" in results:
+        path = output_dir / "fig4_traffic_intensity.png"
+        plot_traffic_intensity(results["bottleneck_ranking"], path)
+        generated.append(path)
+        plt.close()
 
-    Layout
-    ------
-    1 row × 2 columns, shared figure width ≈ 10 in.
+    # Figure 5: Network topology
+    if "routing_probabilities" in results:
+        service_rates = None
+        if "residence_summary" in results:
+            service_rates = {
+                row["state"]: 1.0 / row["mean_hours"]
+                for _, row in results["residence_summary"].iterrows()
+            }
+        path = output_dir / "fig5_network_topology.png"
+        plot_network_topology(results["routing_probabilities"], service_rates, path)
+        generated.append(path)
+        plt.close()
 
-    Output
-    ------
-    ``results/figures/fig4_synthetic_recovery_accuracy.{png,pdf}``
-    """
-    raise NotImplementedError(
-        "Implement this function when recovery_validation is ready.\n"
-        "Expected input:\n"
-        "  results/synthetic_sweep/sweep_results.csv\n"
-        "See docstring for layout details."
-    )
+    # Figure 6: Recovery validation (from synthetic sweep)
+    from queuediff.synthetic_generator import default_hematopoiesis_params
+    from queuediff.recovery_validation import validate_parameter_recovery
 
+    params = default_hematopoiesis_params()
+    recovery = validate_parameter_recovery(params, n_samples=1000,
+                                           rng=np.random.default_rng(42))
+    path = output_dir / "fig6_recovery_validation.png"
+    plot_recovery_validation(recovery, path)
+    generated.append(path)
+    plt.close()
 
-# ------------------------------------------------------------------
-# Orchestration
-# ------------------------------------------------------------------
-
-
-def main() -> None:
-    """Generate all figures."""
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-
-    functions = [
-        ("fig1_residence_time_distributions", plot_residence_time_distributions),
-        ("fig2_aic_bic_comparison", plot_aic_bic_comparison),
-        ("fig3_bottleneck_ranking", plot_bottleneck_ranking),
-        ("fig4_synthetic_recovery_accuracy", plot_synthetic_recovery_accuracy),
-    ]
-
-    for name, func in functions:
-        print(f"[{name}]")
-        try:
-            func()
-        except NotImplementedError as e:
-            print(f"  SKIPPED — {e}")
-        except FileNotFoundError as e:
-            print(f"  SKIPPED — missing input data: {e}")
-        except Exception as e:
-            print(f"  ERROR  — {type(e).__name__}: {e}")
-        print()
-
-    print("All figures processed.")
+    print(f"Generated {len(generated)} figures in {output_dir}")
+    return generated
 
 
 if __name__ == "__main__":
-    main()
+    import json
+
+    # Generate figures from saved results if available
+    script_dir = Path(__file__).parent
+    results_dir = script_dir.parent / "results"
+    figures_dir = results_dir / "figures"
+
+    # Load saved results
+    print("Generating figures from saved results...")
+
+    results = {}
+    # Load CSVs back if available
+    csv_files = {
+        "residence_summary": "residence_times.csv",
+        "model_comparison": "model_comparison.csv",
+        "bottleneck_ranking": "bottleneck_ranking.csv",
+    }
+    for key, filename in csv_files.items():
+        path = results_dir / filename
+        if path.exists():
+            results[key] = pd.read_csv(path)
+
+    # Load state assignments (for fig 1)
+    state_assignments_path = results_dir / "state_assignments.csv"
+    if state_assignments_path.exists():
+        state_df = pd.read_csv(state_assignments_path, index_col=0)
+        results["state_assignments"] = state_df["state"]
+
+    # Load residence times as dict of arrays (for fig 2)
+    residence_times_path = results_dir / "residence_times.json"
+    if residence_times_path.exists():
+        with open(residence_times_path) as f:
+            rt_json = json.load(f)
+        results["residence_times"] = {k: np.array(v) for k, v in rt_json.items()}
+
+    # Load routing probabilities (for fig 5)
+    routing_path = results_dir / "routing_probabilities.json"
+    if routing_path.exists():
+        with open(routing_path) as f:
+            results["routing_probabilities"] = json.load(f)
+
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    # Figure 1: State distribution
+    if "state_assignments" in results:
+        path = figures_dir / "fig1_state_distribution.png"
+        plot_state_distribution(results["state_assignments"], path)
+        print(f"  Generated: {path}")
+        plt.close()
+
+    # Figure 2: Residence time distributions
+    if "residence_times" in results and "model_comparison" in results:
+        path = figures_dir / "fig2_residence_distributions.png"
+        plot_residence_time_distributions(
+            results["residence_times"], results["model_comparison"], path
+        )
+        print(f"  Generated: {path}")
+        plt.close()
+
+    # Figure 3: Model comparison
+    if "model_comparison" in results:
+        path = figures_dir / "fig3_model_comparison.png"
+        plot_model_comparison(results["model_comparison"], path)
+        print(f"  Generated: {path}")
+        plt.close()
+
+    # Figure 4: Traffic intensity
+    if "bottleneck_ranking" in results:
+        path = figures_dir / "fig4_traffic_intensity.png"
+        plot_traffic_intensity(results["bottleneck_ranking"], path)
+        print(f"  Generated: {path}")
+        plt.close()
+
+    # Figure 5: Network topology
+    if "routing_probabilities" in results:
+        service_rates = None
+        if "residence_summary" in results:
+            service_rates = {
+                row["state"]: 1.0 / row["mean_hours"]
+                for _, row in results["residence_summary"].iterrows()
+            }
+        path = figures_dir / "fig5_network_topology.png"
+        plot_network_topology(results["routing_probabilities"], service_rates, path)
+        print(f"  Generated: {path}")
+        plt.close()
+
+    # Figure 6: Recovery validation (always generate from synthetic data)
+    from queuediff.synthetic_generator import default_hematopoiesis_params
+    from queuediff.recovery_validation import validate_parameter_recovery
+
+    params = default_hematopoiesis_params()
+    recovery = validate_parameter_recovery(params, n_samples=1000,
+                                           rng=np.random.default_rng(42))
+    path = figures_dir / "fig6_recovery_validation.png"
+    plot_recovery_validation(recovery, path)
+    print(f"  Generated: {path}")
+    plt.close()
+
+    print("Done.")

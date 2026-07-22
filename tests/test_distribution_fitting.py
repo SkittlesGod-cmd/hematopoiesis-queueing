@@ -1,246 +1,109 @@
+"""Tests for distribution_fitting module."""
+
+from __future__ import annotations
+
 import numpy as np
-import pandas as pd
 import pytest
+from scipy import stats
+
+from queuediff.distribution_fitting import (
+    FitResult,
+    fit_exponential,
+    fit_gamma,
+    likelihood_ratio_test,
+)
 
 
-# ---------------------------------------------------------------------------
-# fit_gamma  —  MLE for a gamma distribution, returns dict with keys
-#               shape, loc, scale, loglik, n
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def gamma_data():
+    """Gamma-distributed data with known parameters."""
+    rng = np.random.default_rng(42)
+    # shape=10, scale=1.5 => mean=15, clearly non-exponential
+    return rng.gamma(shape=10, scale=1.5, size=500)
+
+
+@pytest.fixture
+def exponential_data():
+    """Exponential data (gamma with shape=1)."""
+    rng = np.random.default_rng(42)
+    return rng.exponential(scale=10.0, size=500)
+
 
 class TestFitGamma:
-    def test_shape_positive(self):
-        rng = np.random.default_rng(42)
-        data = rng.gamma(shape=2.0, scale=1.5, size=2000)
-        from queuediff.distribution_fitting import fit_gamma
-        result = fit_gamma(data)
-        assert result["shape"] > 0
-        assert result["scale"] > 0
+    def test_returns_fit_result(self, gamma_data):
+        result = fit_gamma(gamma_data)
+        assert isinstance(result, FitResult)
+        assert result.distribution == "gamma"
 
-    def test_recovers_known_parameters(self):
-        rng = np.random.default_rng(42)
-        true_shape, true_scale = 3.0, 2.0
-        data = rng.gamma(shape=true_shape, scale=true_scale, size=5000)
-        from queuediff.distribution_fitting import fit_gamma
-        result = fit_gamma(data)
-        assert abs(result["shape"] - true_shape) < 0.3
-        assert abs(result["scale"] - true_scale) < 0.3
+    def test_recovers_shape(self, gamma_data):
+        """Fitted shape should be close to true shape=10."""
+        result = fit_gamma(gamma_data)
+        assert abs(result.params["shape"] - 10.0) < 2.0
 
-    def test_loglik_finite(self):
-        rng = np.random.default_rng(42)
-        data = rng.gamma(shape=2.0, scale=1.0, size=500)
-        from queuediff.distribution_fitting import fit_gamma
-        result = fit_gamma(data)
-        assert np.isfinite(result["loglik"])
+    def test_recovers_scale(self, gamma_data):
+        """Fitted scale should be close to true scale=1.5."""
+        result = fit_gamma(gamma_data)
+        assert abs(result.params["scale"] - 1.5) < 0.5
 
-    def test_n_matches_input_length(self):
-        rng = np.random.default_rng(42)
-        data = rng.gamma(shape=2.0, scale=1.0, size=300)
-        from queuediff.distribution_fitting import fit_gamma
-        result = fit_gamma(data)
-        assert result["n"] == 300
+    def test_mean_close_to_true(self, gamma_data):
+        result = fit_gamma(gamma_data)
+        assert abs(result.mean - 15.0) < 2.0
 
-    def test_raises_valueerror_for_fewer_than_ten_obs(self):
-        from queuediff.distribution_fitting import fit_gamma
-        with pytest.raises(ValueError, match="Need at least 10 observations"):
-            fit_gamma(np.array([5.0, 6.0, 7.0, 8.0, 9.0]))  # only 5 points
+    def test_n_params_is_two(self, gamma_data):
+        result = fit_gamma(gamma_data)
+        assert result.n_params == 2
 
-    def test_handles_nan_in_input(self):
-        rng = np.random.default_rng(42)
-        data = rng.gamma(shape=2.0, scale=1.0, size=100)
-        data[10:20] = np.nan
-        from queuediff.distribution_fitting import fit_gamma
-        result = fit_gamma(data)
-        assert result["n"] == 90
+    def test_rejects_negative_data(self):
+        with pytest.raises(ValueError, match="positive"):
+            fit_gamma(np.array([-1.0, 2.0, 3.0]))
 
+    def test_rejects_too_few_samples(self):
+        with pytest.raises(ValueError, match="at least 2"):
+            fit_gamma(np.array([1.0]))
 
-# ---------------------------------------------------------------------------
-# fit_exponential  —  MLE for an exponential distribution, returns dict with
-#                     keys loc, scale, loglik, n
-# ---------------------------------------------------------------------------
 
 class TestFitExponential:
-    def test_scale_positive(self):
-        rng = np.random.default_rng(42)
-        data = rng.exponential(scale=2.0, size=2000)
-        from queuediff.distribution_fitting import fit_exponential
-        result = fit_exponential(data)
-        assert result["scale"] > 0
+    def test_returns_fit_result(self, exponential_data):
+        result = fit_exponential(exponential_data)
+        assert isinstance(result, FitResult)
+        assert result.distribution == "exponential"
 
-    def test_recovers_known_rate(self):
-        rng = np.random.default_rng(42)
-        true_rate = 0.5
-        data = rng.exponential(scale=1.0 / true_rate, size=5000)
-        from queuediff.distribution_fitting import fit_exponential
-        result = fit_exponential(data)
-        estimated_rate = 1.0 / result["scale"]
-        assert abs(estimated_rate - true_rate) < 0.05
+    def test_recovers_scale(self, exponential_data):
+        """Fitted scale should be close to true scale=10."""
+        result = fit_exponential(exponential_data)
+        assert abs(result.params["scale"] - 10.0) < 2.0
 
-    def test_loglik_finite(self):
-        rng = np.random.default_rng(42)
-        data = rng.exponential(scale=1.0, size=500)
-        from queuediff.distribution_fitting import fit_exponential
-        result = fit_exponential(data)
-        assert np.isfinite(result["loglik"])
-
-    def test_raises_valueerror_for_fewer_than_ten_obs(self):
-        from queuediff.distribution_fitting import fit_exponential
-        with pytest.raises(ValueError, match="Need at least 10 observations"):
-            fit_exponential(np.array([5.0, 6.0, 7.0, 8.0, 9.0]))  # only 5 points
-
-    def test_handles_nan_in_input(self):
-        rng = np.random.default_rng(42)
-        data = rng.exponential(scale=1.0, size=100)
-        data[5:15] = np.nan
-        from queuediff.distribution_fitting import fit_exponential
-        result = fit_exponential(data)
-        assert result["n"] == 90
+    def test_n_params_is_one(self, exponential_data):
+        result = fit_exponential(exponential_data)
+        assert result.n_params == 1
 
 
-# ---------------------------------------------------------------------------
-# aic / bic  —  information criteria
-# ---------------------------------------------------------------------------
+class TestLikelihoodRatioTest:
+    def test_gamma_vs_exponential_on_gamma_data(self, gamma_data):
+        """LR test should reject exponential in favor of gamma for gamma data."""
+        gamma_fit = fit_gamma(gamma_data)
+        exp_fit = fit_exponential(gamma_data)
+        lr_stat, p_value = likelihood_ratio_test(exp_fit, gamma_fit)
+        assert lr_stat > 0
+        assert p_value < 0.001  # Strong rejection of exponential
 
-class TestAIC:
-    def test_formula(self):
-        from queuediff.distribution_fitting import aic
-        loglik = -100.0
-        k = 2
-        expected = 2 * k - 2 * loglik
-        assert aic(loglik, k) == expected
+    def test_gamma_vs_exponential_on_exp_data(self, exponential_data):
+        """LR test should NOT strongly reject exponential for exponential data."""
+        gamma_fit = fit_gamma(exponential_data)
+        exp_fit = fit_exponential(exponential_data)
+        lr_stat, p_value = likelihood_ratio_test(exp_fit, gamma_fit)
+        # p-value should be relatively high (not reject H0)
+        assert p_value > 0.01
 
-    def test_lower_is_better(self):
-        from queuediff.distribution_fitting import aic
-        assert aic(-50.0, 2) < aic(-100.0, 2)
+    def test_same_n_samples_required(self, gamma_data, exponential_data):
+        gamma_fit = fit_gamma(gamma_data)
+        exp_fit = fit_exponential(exponential_data[:100])
+        with pytest.raises(AssertionError):
+            likelihood_ratio_test(exp_fit, gamma_fit)
 
-
-class TestBIC:
-    def test_formula(self):
-        from queuediff.distribution_fitting import bic
-        loglik = -100.0
-        k = 2
-        n = 100
-        expected = k * np.log(n) - 2 * loglik
-        assert bic(loglik, k, n) == expected
-
-    def test_penalises_more_parameters(self):
-        from queuediff.distribution_fitting import bic
-        assert bic(-100.0, 3, 100) > bic(-100.0, 2, 100)
-
-
-# ---------------------------------------------------------------------------
-# fit_distributions_to_state  —  fits both gamma and exponential, returns
-#                                 combined result dict
-# ---------------------------------------------------------------------------
-
-class TestFitDistributionsToState:
-    def test_returns_expected_keys(self):
-        rng = np.random.default_rng(42)
-        data = rng.gamma(shape=2.0, scale=1.0, size=1000)
-        from queuediff.distribution_fitting import fit_distributions_to_state
-        result = fit_distributions_to_state(data)
-        for key in ("n_obs", "gamma_shape", "gamma_scale", "gamma_loglik",
-                     "exp_rate", "exp_loglik", "gamma_aic", "exp_aic",
-                     "gamma_bic", "exp_bic"):
-            assert key in result, f"Missing key: {key}"
-
-    def test_gamma_preferred_for_gamma_data(self):
-        rng = np.random.default_rng(42)
-        data = rng.gamma(shape=3.0, scale=1.0, size=2000)
-        from queuediff.distribution_fitting import fit_distributions_to_state
-        result = fit_distributions_to_state(data)
-        assert result["gamma_aic"] < result["exp_aic"], (
-            f"Gamma AIC ({result['gamma_aic']:.1f}) should be lower "
-            f"than exponential AIC ({result['exp_aic']:.1f}) for "
-            "gamma-distributed data"
-        )
-
-    def test_exponential_preferred_for_exponential_data(self):
-        rng = np.random.default_rng(42)
-        data = rng.exponential(scale=1.0, size=2000)
-        from queuediff.distribution_fitting import fit_distributions_to_state
-        result = fit_distributions_to_state(data)
-        assert result["exp_aic"] <= result["gamma_aic"] + 1.0, (
-            f"Exponential AIC ({result['exp_aic']:.1f}) should be "
-            "close to or lower than gamma AIC "
-            f"({result['gamma_aic']:.1f}) for exponential data. "
-            "A small penalty tolerance (1.0) is allowed since the "
-            "gamma nests the exponential as a special case (shape=1)."
-        )
-
-    def test_gamma_returns_shape_near_one_for_exponential_data(self):
-        rng = np.random.default_rng(42)
-        data = rng.exponential(scale=1.5, size=5000)
-        from queuediff.distribution_fitting import fit_distributions_to_state
-        result = fit_distributions_to_state(data)
-        assert abs(result["gamma_shape"] - 1.0) < 0.15, (
-            f"Gamma shape should be near 1.0 for exponential data, "
-            f"got {result['gamma_shape']:.3f}"
-        )
-
-    def test_exp_rate_matches_one_over_mean(self):
-        rng = np.random.default_rng(42)
-        data = rng.exponential(scale=2.0, size=2000)
-        from queuediff.distribution_fitting import fit_distributions_to_state
-        result = fit_distributions_to_state(data)
-        mle_rate = 1.0 / np.mean(data)
-        assert abs(result["exp_rate"] - mle_rate) < 0.02, (
-            f"MLE exponential rate ({result['exp_rate']:.4f}) should "
-            f"approximately equal 1/mean ({mle_rate:.4f})"
-        )
-
-
-# ---------------------------------------------------------------------------
-# fit_all_states  —  applies fit_distributions_to_state across all groups
-#                    in a DataFrame, returns a DataFrame with one row per
-#                    state
-# ---------------------------------------------------------------------------
-
-class TestFitAllStates:
-    def test_one_row_per_state(self):
-        rng = np.random.default_rng(42)
-        n_per = 300
-        records = []
-        for state in ["HSC", "MPP", "CMP"]:
-            for _ in range(n_per):
-                records.append(
-                    {"state": state, "residence_time": rng.gamma(2.0, 1.0)}
-                )
-        df = pd.DataFrame(records)
-        from queuediff.distribution_fitting import fit_all_states
-        result = fit_all_states(df, state_col="state", time_col="residence_time")
-        assert list(result["state"]) == ["HSC", "MPP", "CMP"]
-        assert len(result) == 3
-
-    def test_returns_dataframe(self):
-        rng = np.random.default_rng(42)
-        df = pd.DataFrame({
-            "state": ["HSC"] * 100,
-            "residence_time": rng.gamma(2.0, 1.0, size=100),
-        })
-        from queuediff.distribution_fitting import fit_all_states
-        result = fit_all_states(df)
-        assert isinstance(result, pd.DataFrame)
-
-    def test_columns_present(self):
-        rng = np.random.default_rng(42)
-        df = pd.DataFrame({
-            "state": ["HSC"] * 100,
-            "residence_time": rng.gamma(2.0, 1.0, size=100),
-        })
-        from queuediff.distribution_fitting import fit_all_states
-        result = fit_all_states(df)
-        for col in ("state", "n_obs", "gamma_aic", "exp_aic", "exp_rate"):
-            assert col in result.columns, f"Missing column: {col}"
-
-    def test_empty_group_returns_nan(self):
-        rng = np.random.default_rng(42)
-        df = pd.DataFrame({
-            "state": ["HSC"] * 200,
-            "residence_time": rng.gamma(2.0, 1.0, size=200),
-        })
-        from queuediff.distribution_fitting import fit_all_states
-        result = fit_all_states(df)
-        hsc_row = result[result["state"] == "HSC"]
-        assert hsc_row["n_obs"].values[0] == 200
-        assert np.isfinite(hsc_row["gamma_aic"].values[0])
+    def test_aic_favors_gamma_for_gamma_data(self, gamma_data):
+        """AIC should be lower for gamma when data is truly gamma."""
+        gamma_fit = fit_gamma(gamma_data)
+        exp_fit = fit_exponential(gamma_data)
+        # delta_aic = exp_aic - gamma_aic should be > 0
+        assert exp_fit.aic - gamma_fit.aic > 2.0

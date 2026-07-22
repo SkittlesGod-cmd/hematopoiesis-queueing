@@ -1,384 +1,297 @@
-"""Synthetic data generation for validating the queueing inference pipeline.
+"""Synthetic data generator for validation of the queueing network pipeline.
 
-Simulates differentiation hierarchies as semi-Markov processes with known,
-injected bottleneck locations. Used to validate the rest of the pipeline
-before it touches real data.
+Generates synthetic clone trajectory data with known ground-truth parameters
+(gamma-distributed service times, known routing probabilities) to validate
+that the pipeline recovers true parameters.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import numpy as np
 import pandas as pd
-import networkx as nx
-from typing import Dict, List, Tuple, Optional
+from scipy.stats import gamma as gamma_dist
 
 
-def generate_hierarchy(
-    n_states: int,
-    branching_structure: Optional[Dict[int, List[int]]] = None,
-    seed: int = 42
-) -> nx.DiGraph:
-    """Generate a directed graph representing a differentiation hierarchy.
+@dataclass
+class SyntheticParameters:
+    """Ground-truth parameters for synthetic data generation.
+
+    Attributes
+    ----------
+    states : list[str]
+        Ordered state names.
+    gamma_shapes : dict[str, float]
+        Gamma shape parameter (k) per state. k=1 is exponential.
+    gamma_scales : dict[str, float]
+        Gamma scale parameter (theta) per state. Mean = k * theta (hours).
+    routing_probs : dict[str, dict[str, float]]
+        Transition probabilities. routing_probs[src][dst] = probability.
+    source_state : str
+        Entry point for cells into the network.
+    n_clones : int
+        Number of clones to simulate.
+    cells_per_clone : int
+        Number of cells per clone.
+    observation_times : list[float]
+        Timepoints at which cells are observed (hours).
+    """
+
+    states: list[str]
+    gamma_shapes: dict[str, float]
+    gamma_scales: dict[str, float]
+    routing_probs: dict[str, dict[str, float]]
+    source_state: str
+    n_clones: int = 50
+    cells_per_clone: int = 20
+    observation_times: list[float] = field(default_factory=lambda: [48.0, 96.0, 144.0])
+
+
+def default_hematopoiesis_params() -> SyntheticParameters:
+    """Default synthetic parameters mimicking hematopoietic differentiation.
+
+    Uses biologically-plausible values inspired by real pipeline outputs.
+    Gamma shapes > 1 for all states (semi-Markov claim).
+    """
+    states = ["HSC", "MPP", "CMP", "LMPP", "MEP", "GMP"]
+    return SyntheticParameters(
+        states=states,
+        gamma_shapes={
+            "HSC": 15.0, "MPP": 12.0, "CMP": 10.0,
+            "LMPP": 8.0, "MEP": 18.0, "GMP": 20.0,
+        },
+        gamma_scales={
+            "HSC": 1.1, "MPP": 1.1, "CMP": 1.05,
+            "LMPP": 1.05, "MEP": 1.02, "GMP": 0.97,
+        },
+        routing_probs={
+            "HSC": {"MPP": 1.0},
+            "MPP": {"CMP": 0.5, "LMPP": 0.5},
+            "CMP": {"MEP": 0.6, "GMP": 0.4},
+            "LMPP": {},  # terminal
+            "MEP": {},   # terminal
+            "GMP": {},   # terminal
+        },
+        source_state="HSC",
+        n_clones=50,
+        cells_per_clone=20,
+        observation_times=[48.0, 96.0, 144.0],
+    )
+
+
+def generate_residence_times(
+    params: SyntheticParameters,
+    n_samples: int,
+    state: str,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Generate gamma-distributed residence times for a single state.
 
     Parameters
     ----------
-    n_states : int
-        Number of states in the hierarchy. Must be >= 2.
-    branching_structure : dict[int, list[int]], optional
-        Mapping from parent state index to list of child state indices.
-        If None, creates a linear chain. Each child must have index > parent
-        to maintain DAG structure. Example: {1: [2, 3]} means state 1
-        branches to states 2 and 3.
-    seed : int, default=42
-        Random seed for reproducibility (affects branch probabilities).
+    params : SyntheticParameters
+        Parameters defining the gamma distribution.
+    n_samples : int
+        Number of residence time samples to generate.
+    state : str
+        Which state to generate for.
+    rng : Generator, optional
+        Random number generator for reproducibility.
 
     Returns
     -------
-    networkx.DiGraph
-        Directed acyclic graph where nodes are state indices (0 to n_states-1)
-        and edges represent allowed transitions. Start state is 0.
-        Terminal states have out-degree 0.
-        Each edge has a 'prob' attribute for transition probability.
+    ndarray
+        Array of residence times in hours.
     """
-    if n_states < 2:
-        raise ValueError("n_states must be >= 2")
+    if rng is None:
+        rng = np.random.default_rng()
 
-    rng = np.random.default_rng(seed)
-    G = nx.DiGraph()
+    k = params.gamma_shapes[state]
+    theta = params.gamma_scales[state]
 
-    # Add all states as nodes
-    for i in range(n_states):
-        G.add_node(i)
-
-    if branching_structure is None:
-        # Linear chain: 0 -> 1 -> 2 -> ... -> n_states-1
-        for i in range(n_states - 1):
-            G.add_edge(i, i + 1, prob=1.0)
-    else:
-        # Build from branching structure
-        all_children = set()
-        for parent, children in branching_structure.items():
-            if parent >= n_states:
-                raise ValueError(f"Parent state {parent} >= n_states ({n_states})")
-            for child in children:
-                if child >= n_states:
-                    raise ValueError(f"Child state {child} >= n_states ({n_states})")
-                if child <= parent:
-                    raise ValueError(f"Child {child} must be > parent {parent} for DAG")
-                all_children.add(child)
-
-        # Determine which states have no incoming edges (potential starts)
-        # and which have no outgoing edges in the structure (terminals)
-        has_incoming = set(all_children)
-        has_outgoing = set(branching_structure.keys())
-
-        # Add edges with probabilities
-        for parent, children in branching_structure.items():
-            if len(children) == 1:
-                G.add_edge(parent, children[0], prob=1.0)
-            else:
-                # Sample Dirichlet for branch probabilities
-                probs = rng.dirichlet(np.ones(len(children)))
-                for child, prob in zip(children, probs):
-                    G.add_edge(parent, child, prob=prob)
-
-        # Connect unconnected states linearly to ensure single start at 0
-        # and all states reachable
-        connected = set()
-        def dfs(node):
-            connected.add(node)
-            for succ in G.successors(node):
-                if succ not in connected:
-                    dfs(succ)
-        dfs(0)
-
-        # Add missing connections for any unreachable states
-        for i in range(n_states):
-            if i not in connected:
-                # Find nearest connected predecessor
-                preds = [j for j in range(i) if j in connected]
-                if preds:
-                    pred = max(preds)
-                    G.add_edge(pred, i, prob=1.0)
-                    dfs(i)
-
-        # Ensure all nodes reachable from 0 (single start)
-        for i in range(1, n_states):
-            if not nx.has_path(G, 0, i):
-                # Connect from nearest reachable predecessor
-                for j in range(i):
-                    if nx.has_path(G, 0, j):
-                        G.add_edge(j, i, prob=1.0)
-                        break
-
-    # Verify it's a DAG with single start (0)
-    assert nx.is_directed_acyclic_graph(G), "Graph must be a DAG"
-    assert 0 in G.nodes, "Start state 0 must exist"
-    assert G.in_degree(0) == 0, "State 0 must be the unique start state"
-
-    return G
+    return rng.gamma(shape=k, scale=theta, size=n_samples)
 
 
-def simulate_cells(
-    hierarchy: nx.DiGraph,
-    n_cells: int,
-    gamma_params_per_state: Dict[int, Tuple[float, float]],
-    bottleneck_state: int,
-    bottleneck_severity: float,
-    seed: int = 42
+def simulate_clone_trajectories(
+    params: SyntheticParameters,
+    rng: np.random.Generator | None = None,
 ) -> pd.DataFrame:
-    """Simulate cells moving through a differentiation hierarchy.
+    """Simulate clone-traced cell trajectories through the queueing network.
 
-    Each cell independently traverses from start state (0) to a terminal state,
-    sampling residence (sojourn) times from Gamma distributions per state.
-    The bottleneck_state has its Gamma shape inflated by bottleneck_severity.
+    Each cell enters at source_state, spends a gamma-distributed time there,
+    then routes to the next state according to routing_probs, until reaching
+    a terminal state (no outgoing transitions).
+
+    Cells are observed at each observation_time. The observed state is whichever
+    state the cell is in at that timepoint.
 
     Parameters
     ----------
-    hierarchy : networkx.DiGraph
-        Directed acyclic graph from generate_hierarchy().
-        Nodes are state indices. Edges have 'prob' attribute.
-    n_cells : int
-        Number of cells to simulate. Must be > 0.
-    gamma_params_per_state : dict[int, tuple[float, float]]
-        Mapping from state index to (shape, scale) for Gamma distribution.
-        Must contain all states in hierarchy.
-    bottleneck_state : int
-        State index where the bottleneck is injected.
-        Must be a valid state in hierarchy.
-    bottleneck_severity : float
-        Factor by which to inflate the Gamma shape parameter at bottleneck_state.
-        Must be >= 1.0 (1.0 = no bottleneck, higher = more severe congestion).
-    seed : int, default=42
-        Random seed for full reproducibility.
+    params : SyntheticParameters
+        Ground-truth parameters for simulation.
+    rng : Generator, optional
+        Random number generator for reproducibility.
 
     Returns
     -------
-    pandas.DataFrame
-        Columns: cell_id (int), state (int), entry_time (float),
-        exit_time (float), next_state (int or NaN for terminal).
-        One row per cell-state visit. Sorted by cell_id then entry_time.
+    pd.DataFrame
+        Columns: clone_id, cell_id, timepoint, state, entry_time, exit_time.
+        One row per cell per observation timepoint where the cell is observed.
     """
-    if n_cells <= 0:
-        raise ValueError("n_cells must be > 0")
-    if bottleneck_severity < 1.0:
-        raise ValueError("bottleneck_severity must be >= 1.0")
-    if bottleneck_state not in hierarchy.nodes:
-        raise ValueError(f"bottleneck_state {bottleneck_state} not in hierarchy")
-    for state in hierarchy.nodes:
-        if state not in gamma_params_per_state:
-            raise ValueError(f"Missing gamma params for state {state}")
-
-    rng = np.random.default_rng(seed)
-
-    # Identify terminal states (out-degree 0)
-    terminal_states = {n for n in hierarchy.nodes if hierarchy.out_degree(n) == 0}
-
-    # Build transition probability matrix for each state
-    trans_probs: Dict[int, Tuple[List[int], List[float]]] = {}
-    for state in hierarchy.nodes:
-        if state in terminal_states:
-            continue
-        successors = list(hierarchy.successors(state))
-        probs = [hierarchy.edges[state, succ]['prob'] for succ in successors]
-        trans_probs[state] = (successors, probs)
-
-    # Prepare modified gamma params for bottleneck
-    mod_gamma_params = dict(gamma_params_per_state)
-    if bottleneck_severity > 1.0:
-        shape, scale = gamma_params_per_state[bottleneck_state]
-        mod_gamma_params[bottleneck_state] = (shape * bottleneck_severity, scale)
+    if rng is None:
+        rng = np.random.default_rng()
 
     records = []
-    for cell_id in range(n_cells):
-        current_state = 0
-        current_time = 0.0
 
-        while current_state not in terminal_states:
-            # Sample residence time
-            shape, scale = mod_gamma_params[current_state]
-            residence = rng.gamma(shape, scale)
+    for clone_idx in range(params.n_clones):
+        for cell_idx in range(params.cells_per_clone):
+            cell_id = f"clone{clone_idx}_cell{cell_idx}"
 
-            entry_time = current_time
-            exit_time = current_time + residence
+            # Simulate trajectory: sequence of (state, entry_time, exit_time)
+            trajectory = _simulate_single_cell(params, rng)
 
-            # Choose next state
-            successors, probs = trans_probs[current_state]
-            next_state = rng.choice(successors, p=probs)
+            # Observe at each timepoint
+            for tp in params.observation_times:
+                state_at_tp = _state_at_time(trajectory, tp)
+                if state_at_tp is not None:
+                    records.append({
+                        "clone_id": clone_idx,
+                        "cell_id": cell_id,
+                        "timepoint": tp,
+                        "state": state_at_tp,
+                    })
 
-            records.append({
-                'cell_id': cell_id,
-                'state': current_state,
-                'entry_time': entry_time,
-                'exit_time': exit_time,
-                'next_state': next_state
-            })
-
-            current_state = next_state
-            current_time = exit_time
-
-        # Record terminal state visit (exit_time = entry_time, next_state = NaN)
-        shape, scale = mod_gamma_params[current_state]
-        residence = rng.gamma(shape, scale)
-        entry_time = current_time
-        exit_time = current_time + residence
-        records.append({
-            'cell_id': cell_id,
-            'state': current_state,
-            'entry_time': entry_time,
-            'exit_time': exit_time,
-            'next_state': np.nan
-        })
-
-    df = pd.DataFrame(records)
-    df = df.sort_values(['cell_id', 'entry_time']).reset_index(drop=True)
-    return df
+    return pd.DataFrame(records)
 
 
-def generate_severity_sweep(
-    hierarchy: nx.DiGraph,
-    n_cells: int,
-    bottleneck_state: int,
-    severity_values: np.ndarray,
-    gamma_params_per_state: Dict[int, Tuple[float, float]],
-    seed: int = 42
-) -> Dict[float, pd.DataFrame]:
-    """Generate a sweep of simulated datasets across bottleneck severities.
+def compute_true_residence_times(
+    params: SyntheticParameters,
+) -> dict[str, float]:
+    """Compute true mean residence times from parameters.
+
+    Mean of gamma(k, theta) = k * theta.
 
     Parameters
     ----------
-    hierarchy : networkx.DiGraph
-        Differentiation hierarchy from generate_hierarchy().
-    n_cells : int
-        Number of cells per severity level.
-    bottleneck_state : int
-        State index where bottleneck is injected.
-    severity_values : numpy.ndarray
-        Array of severity values (e.g., np.linspace(1.0, 5.0, 20)).
-        Each value >= 1.0.
-    gamma_params_per_state : dict[int, tuple[float, float]]
-        Base Gamma (shape, scale) parameters for each state.
-    seed : int, default=42
-        Base random seed. Each severity gets a derived seed for independence.
+    params : SyntheticParameters
+        Ground-truth parameters.
 
     Returns
     -------
-    dict[float, pandas.DataFrame]
-        Mapping from severity value to simulated DataFrame (from simulate_cells).
+    dict
+        state -> mean residence time in hours.
     """
-    if len(severity_values) == 0:
-        raise ValueError("severity_values must not be empty")
-    if np.any(severity_values < 1.0):
-        raise ValueError("All severity_values must be >= 1.0")
-
-    base_rng = np.random.default_rng(seed)
-    # Derive independent seeds for each severity
-    severity_seeds = base_rng.integers(0, 2**32, size=len(severity_values))
-
-    results = {}
-    for severity, sev_seed in zip(severity_values, severity_seeds):
-        df = simulate_cells(
-            hierarchy=hierarchy,
-            n_cells=n_cells,
-            gamma_params_per_state=gamma_params_per_state,
-            bottleneck_state=bottleneck_state,
-            bottleneck_severity=float(severity),
-            seed=int(sev_seed)
-        )
-        results[float(severity)] = df
-
-    return results
-
-
-if __name__ == "__main__":
-    """Sanity check: generate example hierarchy matching coarse meta-hierarchy.
-
-    Coarse meta-hierarchy from research_plan.md:
-    Stem/Multipotent -> Myeloid-primed Progenitor -> Lymphoid-primed Progenitor
-    -> Committed Progenitor -> Mature
-
-    With one branch point: Myeloid-primed branches to Myeloid-committed
-    and Lymphoid-committed (both terminal).
-    5 states total:
-    0: Stem_Multipotent (start)
-    1: Myeloid_Primed_Progenitor
-    2: Branch_Point (Lymphoid_Primed_Progenitor)
-    3: Committed_Progenitor_Myeloid (terminal)
-    4: Committed_Progenitor_Lymphoid (terminal)
-    """
-    print("=" * 60)
-    print("SYNTHETIC GENERATOR SANITY CHECK")
-    print("=" * 60)
-
-    # 5 states, one branch point at state 1 -> states 2 and 3
-    # State 4 is reached from state 2 (linear after branch)
-    # Actually: 0 -> 1 -> {2, 3}, then 2 -> 4, 3 terminal
-    # Wait, need 5 states total with one branch point
-    # Let's do: 0 -> 1 -> {2, 3}, 2 -> 4, 3 terminal
-    # That's 5 states (0,1,2,3,4) with branch at 1
-    hierarchy = generate_hierarchy(
-        n_states=5,
-        branching_structure={1: [2, 3], 2: [4]},
-        seed=42
-    )
-
-    print(f"\nHierarchy: {hierarchy.number_of_nodes()} states, {hierarchy.number_of_edges()} transitions")
-    print("Edges (with probabilities):")
-    for u, v, data in hierarchy.edges(data=True):
-        print(f"  {u} -> {v} (p={data['prob']:.3f})")
-
-    # Gamma params: (shape, scale) for each state
-    # Mean = shape * scale, Var = shape * scale^2
-    gamma_params = {
-        0: (2.0, 1.0),   # Stem: mean=2.0
-        1: (2.0, 1.5),   # Myeloid-Primed: mean=3.0
-        2: (3.0, 1.0),   # Lymphoid-Primed: mean=3.0
-        3: (2.0, 2.0),   # Myeloid-Committed: mean=4.0
-        4: (4.0, 1.0),   # Lymphoid-Committed (terminal): mean=4.0
+    return {
+        state: params.gamma_shapes[state] * params.gamma_scales[state]
+        for state in params.states
     }
 
-    # Simulate with bottleneck at state 1 (Myeloid-Primed), severity 3.0
-    bottleneck_state = 1
-    bottleneck_severity = 3.0
-    n_cells = 1000
 
-    df = simulate_cells(
-        hierarchy=hierarchy,
-        n_cells=n_cells,
-        gamma_params_per_state=gamma_params,
-        bottleneck_state=bottleneck_state,
-        bottleneck_severity=bottleneck_severity,
-        seed=123
-    )
+def compute_true_traffic_intensity(
+    params: SyntheticParameters,
+    external_arrival_rate: float = 1.0,
+) -> dict[str, float]:
+    """Compute true traffic intensity from parameters.
 
-    print(f"\nSimulated {n_cells} cells with bottleneck at state {bottleneck_state}")
-    print(f"  severity = {bottleneck_severity} (shape inflated by {bottleneck_severity}x)")
+    ρ = λ / μ where μ = 1 / mean_residence_time.
 
-    # Summary statistics
-    print("\n--- Cell counts per state ---")
-    state_counts = df['state'].value_counts().sort_index()
-    for state, count in state_counts.items():
-        print(f"  State {state}: {count} visits")
+    Parameters
+    ----------
+    params : SyntheticParameters
+        Ground-truth parameters.
+    external_arrival_rate : float
+        Arrival rate into the source state.
 
-    print("\n--- Mean residence time per state ---")
-    df['residence'] = df['exit_time'] - df['entry_time']
-    mean_residence = df.groupby('state')['residence'].mean()
-    for state, mean_rt in mean_residence.items():
-        print(f"  State {state}: {mean_rt:.3f}")
+    Returns
+    -------
+    dict
+        state -> traffic intensity.
+    """
+    # Compute arrival rates via topological propagation
+    arrival_rates = {s: 0.0 for s in params.states}
+    arrival_rates[params.source_state] = external_arrival_rate
 
-    print("\n--- Mean residence time at bottleneck state (state 1) ---")
-    bottleneck_res = df[df['state'] == bottleneck_state]['residence']
-    print(f"  Observed mean: {bottleneck_res.mean():.3f}")
-    print(f"  Expected mean (shape={gamma_params[bottleneck_state][0]*bottleneck_severity}*scale={gamma_params[bottleneck_state][1]}): "
-          f"{gamma_params[bottleneck_state][0]*bottleneck_severity*gamma_params[bottleneck_state][1]:.3f}")
+    # Simple topological propagation (assumes DAG)
+    visited = set()
+    queue = [params.source_state]
+    while queue:
+        current = queue.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
 
-    print("\n--- Terminal state distribution ---")
-    terminal_states = {n for n in hierarchy.nodes if hierarchy.out_degree(n) == 0}
-    last_states = df.groupby('cell_id').last()['state']
-    terminal_dist = last_states.value_counts().sort_index()
-    for state, count in terminal_dist.items():
-        print(f"  State {state}: {count} cells ({count/n_cells*100:.1f}%)")
+        if current in params.routing_probs:
+            for target, prob in params.routing_probs[current].items():
+                arrival_rates[target] += arrival_rates[current] * prob
+                if target not in visited:
+                    queue.append(target)
 
-    print("\n" + "=" * 60)
-    print("SANITY CHECK PASSED")
-    print("=" * 60)
+    # Traffic intensity: ρ = λ * mean_residence_time (since μ = 1/mean_time)
+    mean_times = compute_true_residence_times(params)
+    return {
+        state: arrival_rates[state] * mean_times[state]
+        for state in params.states
+    }
+
+
+# ── Private helpers ───────────────────────────────────────────────────────────
+
+
+def _simulate_single_cell(
+    params: SyntheticParameters,
+    rng: np.random.Generator,
+) -> list[tuple[str, float, float]]:
+    """Simulate one cell's trajectory through the network.
+
+    Returns list of (state, entry_time, exit_time) tuples.
+    """
+    trajectory = []
+    current_state = params.source_state
+    current_time = 0.0
+
+    max_steps = 100  # prevent infinite loops
+    for _ in range(max_steps):
+        # Sample residence time
+        k = params.gamma_shapes[current_state]
+        theta = params.gamma_scales[current_state]
+        residence = float(rng.gamma(shape=k, scale=theta))
+
+        entry = current_time
+        exit_time = current_time + residence
+        trajectory.append((current_state, entry, exit_time))
+
+        current_time = exit_time
+
+        # Route to next state
+        routes = params.routing_probs.get(current_state, {})
+        if not routes:
+            break  # terminal state
+
+        targets = list(routes.keys())
+        probs = list(routes.values())
+        current_state = rng.choice(targets, p=probs)
+
+    return trajectory
+
+
+def _state_at_time(
+    trajectory: list[tuple[str, float, float]],
+    time: float,
+) -> str | None:
+    """Find which state a cell is in at the given time.
+
+    Returns None if the cell has exited the system before `time`.
+    """
+    for state, entry, exit_time in trajectory:
+        if entry <= time < exit_time:
+            return state
+
+    # If time >= last exit, cell is still in the last (terminal) state
+    if trajectory:
+        last_state, _, last_exit = trajectory[-1]
+        if time >= last_exit:
+            # Check if it's a terminal state (stays there)
+            return last_state
+
+    return None

@@ -1,300 +1,204 @@
-"""Model comparison and statistical significance testing for residence time distributions.
+"""Model comparison: gamma vs exponential with multiple testing correction.
 
-This module adds likelihood-ratio tests and FDR correction on top of
-AIC/BIC values from distribution_fitting.py to identify statistically
-significant bottlenecks (departures from the exponential/memoryless assumption).
+Compares gamma and exponential fits across multiple states using AIC/BIC
+and likelihood ratio tests with Benjamini-Hochberg FDR correction.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy import stats
-from typing import Dict
 from statsmodels.stats.multitest import multipletests
 
-
-def likelihood_ratio_test(exp_loglik: float, gamma_loglik: float, df: int = 1) -> Dict:
-    """Compute likelihood-ratio test comparing exponential vs gamma.
-
-    The exponential distribution is a special case of gamma (shape=1),
-    making them nested models. Under the null (exponential is true),
-    LR = 2 * (gamma_loglik - exp_loglik) follows chi-squared(df=1).
-
-    Parameters
-    ----------
-    exp_loglik : float
-        Log-likelihood of the exponential fit.
-    gamma_loglik : float
-        Log-likelihood of the gamma fit.
-    df : int, default=1
-        Degrees of freedom for the chi-squared distribution.
-        Fixed at 1 because gamma has 1 more free parameter than exponential.
-
-    Returns
-    -------
-    dict
-        Contains: lr_statistic (float), p_value (float), df (int).
-        If LR < 0 (numerical noise when true model is exponential),
-        clips to 0 and returns p_value = 1.0.
-    """
-    lr = 2.0 * (gamma_loglik - exp_loglik)
-
-    if lr < 0:
-        # Numerical noise when exponential is true; clip to boundary
-        lr = 0.0
-        p_value = 1.0
-    else:
-        p_value = stats.chi2.sf(lr, df)
-
-    return {
-        'lr_statistic': lr,
-        'p_value': p_value,
-        'df': df
-    }
+from queuediff.distribution_fitting import (
+    FitResult,
+    fit_exponential,
+    fit_gamma,
+    likelihood_ratio_test,
+)
 
 
-def compare_all_states(fit_all_states_df: pd.DataFrame) -> pd.DataFrame:
-    """Run likelihood-ratio test for each state in the fit results.
+def compare_models_per_state(
+    residence_times: dict[str, np.ndarray],
+    min_samples: int = 10,
+) -> pd.DataFrame:
+    """Compare gamma vs exponential fits for each state.
 
     Parameters
     ----------
-    fit_all_states_df : pandas.DataFrame
-        Output from distribution_fitting.fit_all_states with columns
-        exp_log_likelihood and gamma_log_likelihood.
+    residence_times : dict[str, ndarray]
+        State name -> array of residence times (hours).
+    min_samples : int, default 10
+        Minimum number of samples required for reliable fitting.
 
     Returns
     -------
-    pandas.DataFrame
-        Input DataFrame with added columns: lr_statistic, p_value.
+    pd.DataFrame
+        One row per state with columns:
+        - state: state name
+        - n_samples: number of residence time observations
+        - gamma_shape, gamma_scale, gamma_mean: gamma fit parameters
+        - exp_scale, exp_mean: exponential fit parameters
+        - gamma_aic, exp_aic, delta_aic: AIC values and difference
+        - gamma_bic, exp_bic, delta_bic: BIC values and difference
+        - lr_statistic, lr_pvalue: likelihood ratio test results
+        - gamma_loglik, exp_loglik: log-likelihoods
+
+    Notes
+    -----
+    delta_aic = exp_aic - gamma_aic (positive favors gamma).
+    delta_bic = exp_bic - gamma_bic (positive favors gamma).
+    States with fewer than min_samples observations are skipped with a warning.
     """
-    required_cols = {'exp_log_likelihood', 'gamma_log_likelihood', 'state'}
-    missing = required_cols - set(fit_all_states_df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    results = []
 
-    df = fit_all_states_df.copy()
-    lr_results = []
+    for state, times in residence_times.items():
+        times = np.asarray(times, dtype=np.float64)
 
-    for _, row in df.iterrows():
-        lr = likelihood_ratio_test(row['exp_log_likelihood'], row['gamma_log_likelihood'])
-        lr_results.append(lr)
+        if len(times) < min_samples:
+            continue
 
-    lr_df = pd.DataFrame(lr_results)
-    return pd.concat([df, lr_df], axis=1)
+        # Fit both distributions
+        gamma_fit = fit_gamma(times)
+        exp_fit = fit_exponential(times)
+
+        # Likelihood ratio test
+        lr_stat, lr_p = likelihood_ratio_test(exp_fit, gamma_fit)
+
+        results.append({
+            "state": state,
+            "n_samples": len(times),
+            "gamma_shape": gamma_fit.params["shape"],
+            "gamma_scale": gamma_fit.params["scale"],
+            "gamma_mean": gamma_fit.mean,
+            "gamma_variance": gamma_fit.variance,
+            "exp_scale": exp_fit.params["scale"],
+            "exp_mean": exp_fit.mean,
+            "gamma_aic": gamma_fit.aic,
+            "exp_aic": exp_fit.aic,
+            "delta_aic": exp_fit.aic - gamma_fit.aic,
+            "gamma_bic": gamma_fit.bic,
+            "exp_bic": exp_fit.bic,
+            "delta_bic": exp_fit.bic - gamma_fit.bic,
+            "lr_statistic": lr_stat,
+            "lr_pvalue": lr_p,
+            "gamma_loglik": gamma_fit.loglik,
+            "exp_loglik": exp_fit.loglik,
+        })
+
+    return pd.DataFrame(results)
 
 
-def apply_fdr_correction(comparison_df: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
-    """Apply Benjamini-Hochberg FDR correction to LRT p-values.
+def apply_fdr_correction(
+    comparison_df: pd.DataFrame,
+    alpha: float = 0.05,
+    delta_aic_threshold: float = 2.0,
+) -> pd.DataFrame:
+    """Apply Benjamini-Hochberg FDR correction to model comparison results.
 
     Parameters
     ----------
-    comparison_df : pandas.DataFrame
-        Output from compare_all_states with a 'p_value' column.
-    alpha : float, default=0.05
-        FDR significance threshold.
+    comparison_df : pd.DataFrame
+        Output from compare_models_per_state.
+    alpha : float, default 0.05
+        FDR significance level.
+    delta_aic_threshold : float, default 2.0
+        Minimum delta AIC to prefer gamma over exponential.
 
     Returns
     -------
-    pandas.DataFrame
-        Input DataFrame with added columns:
-        p_value_corrected (float), significant (bool).
-    """
-    if 'p_value' not in comparison_df.columns:
-        raise ValueError("Input DataFrame must have 'p_value' column")
+    pd.DataFrame
+        Input dataframe augmented with:
+        - fdr_pvalue: BH-corrected p-values
+        - gamma_preferred: True if delta_aic > threshold AND fdr_p < alpha
 
+    Notes
+    -----
+    Gamma is preferred when BOTH conditions hold:
+    1. delta_aic > delta_aic_threshold (meaningful improvement in fit)
+    2. fdr_pvalue < alpha (statistically significant after multiple testing)
+    """
     df = comparison_df.copy()
-    p_values = df['p_value'].to_numpy()
 
-    # statsmodels multipletests returns (reject, pvals_corrected, ...)
-    _, pvals_corrected, _, _ = multipletests(p_values, alpha=alpha, method='fdr_bh')
+    if len(df) == 0:
+        df["fdr_pvalue"] = pd.Series(dtype=float)
+        df["gamma_preferred"] = pd.Series(dtype=bool)
+        return df
 
-    df['p_value_corrected'] = pvals_corrected
-    df['significant'] = pvals_corrected < alpha
+    # BH FDR correction across states
+    _, fdr_pvalues, _, _ = multipletests(
+        df["lr_pvalue"].values,
+        alpha=alpha,
+        method="fdr_bh",
+    )
+
+    df["fdr_pvalue"] = fdr_pvalues
+
+    # Gamma preferred: both criteria must be met
+    df["gamma_preferred"] = (
+        (df["delta_aic"] > delta_aic_threshold) &
+        (df["fdr_pvalue"] < alpha)
+    )
 
     return df
 
 
-def identify_significant_bottlenecks(comparison_df: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
-    """Identify statistically significant bottlenecks.
-
-    Convenience function that runs FDR correction and filters to
-    significant states, sorted by effect size (delta_aic descending).
+def summarize_model_comparison(df: pd.DataFrame) -> str:
+    """Generate a human-readable summary of model comparison results.
 
     Parameters
     ----------
-    comparison_df : pandas.DataFrame
-        Output from compare_all_states.
-    alpha : float, default=0.05
-        FDR significance threshold.
+    df : pd.DataFrame
+        Output from apply_fdr_correction.
 
     Returns
     -------
-    pandas.DataFrame
-        Subset of states where significant=True, sorted by delta_aic descending.
-        Returns empty DataFrame if no significant states.
+    str
+        Formatted text summary for terminal output.
     """
-    corrected = apply_fdr_correction(comparison_df, alpha)
-    significant = corrected[corrected['significant']].copy()
+    lines = [
+        "=" * 70,
+        "MODEL COMPARISON: GAMMA vs EXPONENTIAL SERVICE TIMES",
+        "=" * 70,
+        "",
+    ]
 
-    if len(significant) == 0:
-        return pd.DataFrame(columns=corrected.columns)
+    n_gamma = df["gamma_preferred"].sum()
+    n_total = len(df)
+    lines.append(f"States analyzed: {n_total}")
+    lines.append(f"States preferring gamma: {n_gamma}/{n_total}")
+    lines.append("")
 
-    return significant.sort_values('delta_aic', ascending=False).reset_index(drop=True)
+    lines.append(f"{'State':<8} {'n':>6} {'γ shape':>8} {'γ mean':>8} "
+                 f"{'ΔAIC':>8} {'FDR p':>10} {'Prefer':>8}")
+    lines.append("-" * 70)
 
+    for _, row in df.iterrows():
+        prefer = "GAMMA" if row["gamma_preferred"] else "exp"
+        lines.append(
+            f"{row['state']:<8} {row['n_samples']:>6} "
+            f"{row['gamma_shape']:>8.1f} {row['gamma_mean']:>8.1f}h "
+            f"{row['delta_aic']:>8.0f} {row['fdr_pvalue']:>10.2e} "
+            f"{prefer:>8}"
+        )
 
-if __name__ == "__main__":
-    """Validation: test LRT + FDR on synthetic data with known bottleneck."""
-    print("=" * 80)
-    print("MODEL COMPARISON VALIDATION")
-    print("=" * 80)
+    lines.append("")
+    if n_gamma == n_total and n_total > 0:
+        lines.append(
+            "CONCLUSION: All states show gamma-preferred service times,\n"
+            "confirming the semi-Markov (non-exponential) queueing model."
+        )
+    elif n_gamma > 0:
+        gamma_states = list(df[df["gamma_preferred"]]["state"])
+        lines.append(
+            f"CONCLUSION: {gamma_states} show gamma-preferred service times.\n"
+            f"Partial support for the semi-Markov queueing model."
+        )
+    else:
+        lines.append(
+            "CONCLUSION: No states show gamma-preferred service times.\n"
+            "Exponential (Markov) model is sufficient for this data."
+        )
 
-    from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
-    from queuediff.distribution_fitting import fit_all_states
-
-    # Same 5-state hierarchy as distribution_fitting's sanity check
-    hierarchy = generate_hierarchy(
-        n_states=5,
-        branching_structure={1: [2, 3], 2: [4]},
-        seed=42
-    )
-
-    # Base gamma params (shapes > 1 mean gamma is truly better than exponential)
-    gamma_params = {
-        0: (2.0, 1.0),   # Stem: mean=2.0, shape=2.0
-        1: (2.0, 1.5),   # Myeloid-Primed: mean=3.0, shape=2.0
-        2: (3.0, 1.0),   # Lymphoid-Primed: mean=3.0, shape=3.0
-        3: (2.0, 2.0),   # Myeloid-Committed: mean=4.0, shape=2.0
-        4: (4.0, 1.0),   # Lymphoid-Committed: mean=4.0, shape=4.0
-    }
-
-    bottleneck_state = 1
-    bottleneck_severity = 3.0
-    true_shape_at_bottleneck = gamma_params[bottleneck_state][0] * bottleneck_severity
-
-    print(f"\n--- TEST 1: WITH BOTTLENECK (state {bottleneck_state}, severity={bottleneck_severity}) ---")
-
-    df = simulate_cells(
-        hierarchy=hierarchy,
-        n_cells=2000,
-        gamma_params_per_state=gamma_params,
-        bottleneck_state=bottleneck_state,
-        bottleneck_severity=bottleneck_severity,
-        seed=123
-    )
-
-    # Fit distributions
-    fit_df = fit_all_states(df)
-
-    # Run LRT comparison
-    comparison_df = compare_all_states(fit_df)
-
-    # Apply FDR correction
-    corrected_df = apply_fdr_correction(comparison_df, alpha=0.05)
-
-    # Print full comparison table
-    print("\nFull comparison table (all states):")
-    display_cols = ['state', 'delta_aic', 'lr_statistic', 'p_value',
-                    'p_value_corrected', 'significant']
-    print(corrected_df[display_cols].to_string(index=False))
-
-    # Check 1: bottleneck state has the largest delta_aic
-    max_delta_aic_state = corrected_df.loc[corrected_df['delta_aic'].idxmax(), 'state']
-    has_max_delta_aic = (max_delta_aic_state == bottleneck_state)
-
-    # Check 2: bottleneck state has the highest LR statistic
-    max_lr_state = corrected_df.loc[corrected_df['lr_statistic'].idxmax(), 'state']
-    has_max_lr = (max_lr_state == bottleneck_state)
-
-    # Check 3: bottleneck state has the smallest p-value
-    min_p_state = corrected_df.loc[corrected_df['p_value'].idxmin(), 'state']
-    has_min_p = (min_p_state == bottleneck_state)
-
-    # Check 4: bottleneck state is significant after FDR
-    bottleneck_row = corrected_df[corrected_df['state'] == bottleneck_state].iloc[0]
-    bottleneck_significant = bottleneck_row['significant']
-
-    print(f"\nValidation for bottleneck state {bottleneck_state}:")
-    print(f"  Largest delta_aic?     {has_max_delta_aic} (state {max_delta_aic_state})")
-    print(f"  Largest LR statistic?  {has_max_lr} (state {max_lr_state})")
-    print(f"  Smallest p-value?      {has_min_p} (state {min_p_state})")
-    print(f"  Significant after FDR? {bottleneck_significant}")
-
-    test1_pass = has_max_delta_aic and has_max_lr and has_min_p and bottleneck_significant
-    print(f"  TEST 1 RESULT: {'PASS' if test1_pass else 'FAIL'}")
-
-    # Test 2: Negative control - all exponential (shape=1.0 everywhere)
-    # When data is truly exponential, gamma should NOT be significantly preferred
-    print(f"\n--- TEST 2: NEGATIVE CONTROL (ALL STATES TRULY EXPONENTIAL, shape=1.0) ---")
-
-    exp_params = {s: (1.0, gamma_params[s][1]) for s in gamma_params}  # shape=1 = exponential
-
-    df_null = simulate_cells(
-        hierarchy=hierarchy,
-        n_cells=2000,
-        gamma_params_per_state=exp_params,
-        bottleneck_state=bottleneck_state,
-        bottleneck_severity=1.0,  # No extra bottleneck
-        seed=456
-    )
-
-    fit_df_null = fit_all_states(df_null)
-    comparison_df_null = compare_all_states(fit_df_null)
-    corrected_df_null = apply_fdr_correction(comparison_df_null, alpha=0.05)
-
-    print("\nFull comparison table (negative control):")
-    print(corrected_df_null[display_cols].to_string(index=False))
-
-    n_significant = corrected_df_null['significant'].sum()
-    n_states = len(corrected_df_null)
-    false_positive_rate = n_significant / n_states
-
-    print(f"\nValidation for negative control:")
-    print(f"  Significant states: {n_significant} / {n_states}")
-    print(f"  False positive rate: {false_positive_rate:.3f} (expected ~{0.05})")
-
-    # Pass if FPR is controlled (typically 0 or 1 significant by chance)
-    test2_pass = n_significant <= 1
-    print(f"  TEST 2 RESULT: {'PASS' if test2_pass else 'FAIL'}")
-
-    # Test 3: No bottleneck but gamma data (all states gamma, no extra severity)
-    # In this case, all states should have similar delta_aic, no single outlier
-    print(f"\n--- TEST 3: NO BOTTLENECK, GAMMA DATA (all states gamma, uniform) ---")
-
-    gamma_params_uniform = {s: (2.0, gamma_params[s][1]) for s in gamma_params}  # all shape=2.0
-
-    df_uniform = simulate_cells(
-        hierarchy=hierarchy,
-        n_cells=2000,
-        gamma_params_per_state=gamma_params_uniform,
-        bottleneck_state=bottleneck_state,
-        bottleneck_severity=1.0,
-        seed=789
-    )
-
-    fit_df_uniform = fit_all_states(df_uniform)
-    comparison_df_uniform = compare_all_states(fit_df_uniform)
-    corrected_df_uniform = apply_fdr_correction(comparison_df_uniform, alpha=0.05)
-
-    print("\nFull comparison table (uniform gamma):")
-    print(corrected_df_uniform[display_cols].to_string(index=False))
-
-    # Check: no single state should be an extreme outlier in delta_aic
-    # The ratio of max to min delta_aic should be reasonable
-    delta_aic_max = corrected_df_uniform['delta_aic'].max()
-    delta_aic_min = corrected_df_uniform['delta_aic'].min()
-    delta_aic_ratio = delta_aic_max / delta_aic_min if delta_aic_min > 0 else np.inf
-
-    # With bottleneck, ratio is ~2158/174 = 12.4
-    # Without bottleneck, should be much smaller (similar effect sizes)
-    print(f"\nValidation for uniform gamma:")
-    print(f"  delta_aic range: {delta_aic_min:.1f} - {delta_aic_max:.1f}")
-    print(f"  Max/min ratio:   {delta_aic_ratio:.2f}")
-
-    # Ratio should be small (states have similar evidence for gamma)
-    test3_pass = delta_aic_ratio < 5.0  # heuristic threshold
-    print(f"  TEST 3 RESULT: {'PASS' if test3_pass else 'FAIL'}")
-
-    print("\n" + "=" * 80)
-    print(f"OVERALL: {'PASS' if test1_pass and test2_pass and test3_pass else 'FAIL'}")
-    print("=" * 80)
+    lines.append("=" * 70)
+    return "\n".join(lines)

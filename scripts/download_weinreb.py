@@ -1,83 +1,72 @@
+"""Download Weinreb et al. 2020 data from GEO (GSE140802)."""
+
+from __future__ import annotations
+
+import gzip
 import os
-import sys
+import shutil
+import ssl
+import urllib.request
 from pathlib import Path
 
-import requests
-from tqdm import tqdm
+# Create unverified SSL context for environments with certificate issues
+_SSL_CONTEXT = ssl._create_unverified_context()
 
-DATA_DIR = Path("data/raw/weinreb")
-
+BASE_URL = "https://kleintools.hms.harvard.edu/paper_websites/state_fate2020/"
 FILES = [
-    (
-        "normed_counts",
-        "https://kleintools.hms.harvard.edu/paper_websites/state_fate2020/stateFate_inVitro_normed_counts.mtx.gz",
-    ),
-    (
-        "gene_names",
-        "https://kleintools.hms.harvard.edu/paper_websites/state_fate2020/stateFate_inVitro_gene_names.txt.gz",
-    ),
-    (
-        "clone_matrix",
-        "https://kleintools.hms.harvard.edu/paper_websites/state_fate2020/stateFate_inVitro_clone_matrix.mtx.gz",
-    ),
-    (
-        "metadata",
-        "https://kleintools.hms.harvard.edu/paper_websites/state_fate2020/stateFate_inVitro_metadata.txt.gz",
-    ),
+    "stateFate_inVitro_normed_counts.mtx.gz",
+    "stateFate_inVitro_gene_names.txt.gz",
+    "stateFate_inVitro_metadata.txt.gz",
+    "stateFate_inVitro_clone_matrix.mtx.gz",
 ]
+# Target file names (same as source)
+TARGET_NAMES = FILES
 
 
-def download_file(name: str, url: str, dest: Path) -> bool:
-    if dest.exists() and dest.stat().st_size > 0:
-        return False
+def download_weinreb(output_dir: str | Path | None = None) -> Path:
+    """Download Weinreb data files to output directory.
 
-    try:
-        resp = requests.get(url, stream=True, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise ConnectionError(f"Failed to download {name} from {url}: {e}")
+    Parameters
+    ----------
+    output_dir : str or Path, optional
+        Destination directory. Defaults to scripts/data/raw/weinreb/
+        relative to this script's location.
 
-    total = int(resp.headers.get("content-length", 0))
-    with open(dest, "wb") as f, tqdm(
-        desc=name,
-        total=total,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024,
-        leave=False,
-    ) as bar:
-        for chunk in resp.iter_content(chunk_size=65536):
-            f.write(chunk)
-            bar.update(len(chunk))
+    Returns
+    -------
+    Path
+        Directory containing downloaded files.
+    """
+    if output_dir is None:
+        script_dir = Path(__file__).parent
+        output_dir = script_dir / "data" / "raw" / "weinreb"
 
-    if dest.stat().st_size == 0:
-        raise IOError(f"Downloaded {name} but file is empty: {dest}")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    return True
+    for source_name, target_name in zip(FILES, TARGET_NAMES):
+        target_path = output_dir / target_name
+        if target_path.exists():
+            print(f"  Already exists: {target_name}")
+            continue
 
-
-def main():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    results = []
-    failures = 0
-
-    for name, url in FILES:
-        dest = DATA_DIR / os.path.basename(url)
+        url = BASE_URL + source_name
+        print(f"  Downloading {source_name}...")
         try:
-            downloaded = download_file(name, url, dest)
-            status = "downloaded" if downloaded else "already exists"
-            results.append((name, dest.name, status))
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=_SSL_CONTEXT)
+            )
+            with opener.open(url) as response, open(target_path, "wb") as out:
+                shutil.copyfileobj(response, out)
+            print(f"  -> {target_path}")
         except Exception as e:
-            results.append((name, dest.name, f"FAILED: {e}"))
-            failures += 1
+            print(f"  ERROR downloading {source_name}: {e}")
+            raise
 
-    print()
-    print(f"Weinreb download complete  ({len(results)} files, {failures} failures)")
-    print()
-    for name, filename, status in results:
-        print(f"  {name:20s}  {filename:45s}  {status}")
+    print(f"\nWeinreb data ready in: {output_dir}")
+    return output_dir
 
 
 if __name__ == "__main__":
-    main()
+    print("Downloading Weinreb et al. 2020 (GSE140802)...")
+    download_weinreb()

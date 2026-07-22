@@ -1,355 +1,108 @@
+"""Tests for model_comparison module."""
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import pytest
-from scipy import stats
+
+from queuediff.model_comparison import (
+    apply_fdr_correction,
+    compare_models_per_state,
+    summarize_model_comparison,
+)
 
 
-# ---------------------------------------------------------------------------
-# likelihood_ratio_test  —  LRT comparing exponential vs gamma
-# ---------------------------------------------------------------------------
-
-class TestLikelihoodRatioTest:
-    def test_lr_statistic_non_negative(self):
-        from queuediff.model_comparison import likelihood_ratio_test
-        result = likelihood_ratio_test(exp_loglik=-100.0, gamma_loglik=-90.0)
-        assert result["lr_statistic"] >= 0
-
-    def test_p_value_in_unit_interval(self):
-        from queuediff.model_comparison import likelihood_ratio_test
-        result = likelihood_ratio_test(exp_loglik=-100.0, gamma_loglik=-90.0)
-        assert 0.0 <= result["p_value"] <= 1.0
-
-    def test_correct_chi_squared_computation(self):
-        from queuediff.model_comparison import likelihood_ratio_test
-        # For LR=2*(gamma - exp) = 2*(-90 - -100) = 20
-        # p = chi2.sf(20, df=1)
-        expected_lr = 20.0
-        expected_p = stats.chi2.sf(expected_lr, df=1)
-        result = likelihood_ratio_test(exp_loglik=-100.0, gamma_loglik=-90.0)
-        assert abs(result["lr_statistic"] - expected_lr) < 1e-10
-        assert abs(result["p_value"] - expected_p) < 1e-10
-
-    def test_negative_lr_clips_to_zero(self):
-        from queuediff.model_comparison import likelihood_ratio_test
-        # gamma_loglik < exp_loglik (numerical noise when exponential is true)
-        result = likelihood_ratio_test(exp_loglik=-90.0, gamma_loglik=-100.0)
-        assert result["lr_statistic"] == 0.0
-        assert result["p_value"] == 1.0
-
-    def test_df_returned_correctly(self):
-        from queuediff.model_comparison import likelihood_ratio_test
-        result = likelihood_ratio_test(exp_loglik=-100.0, gamma_loglik=-90.0, df=1)
-        assert result["df"] == 1
-
-    def test_custom_df_allowed(self):
-        from queuediff.model_comparison import likelihood_ratio_test
-        result = likelihood_ratio_test(exp_loglik=-100.0, gamma_loglik=-90.0, df=2)
-        assert result["df"] == 2
-        expected_p = stats.chi2.sf(20.0, df=2)
-        assert abs(result["p_value"] - expected_p) < 1e-10
+@pytest.fixture
+def residence_times_gamma():
+    """Residence times from gamma distributions (not exponential)."""
+    rng = np.random.default_rng(42)
+    return {
+        "StateA": rng.gamma(shape=15, scale=1.2, size=300),
+        "StateB": rng.gamma(shape=10, scale=1.5, size=300),
+        "StateC": rng.gamma(shape=20, scale=0.8, size=300),
+    }
 
 
-# ---------------------------------------------------------------------------
-# compare_all_states  —  adds LRT columns to fit_all_states output
-# ---------------------------------------------------------------------------
-
-class TestCompareAllStates:
-    def test_adds_lr_and_p_columns(self):
-        from queuediff.model_comparison import compare_all_states
-        df = pd.DataFrame({
-            "state": [0, 1],
-            "exp_log_likelihood": [-100.0, -200.0],
-            "gamma_log_likelihood": [-90.0, -190.0],
-            "delta_aic": [10.0, 20.0],
-            "delta_bic": [8.0, 18.0],
-        })
-        result = compare_all_states(df)
-        assert "lr_statistic" in result.columns
-        assert "p_value" in result.columns
-
-    def test_preserves_input_columns(self):
-        from queuediff.model_comparison import compare_all_states
-        df = pd.DataFrame({
-            "state": [0, 1],
-            "exp_log_likelihood": [-100.0, -200.0],
-            "gamma_log_likelihood": [-90.0, -190.0],
-            "delta_aic": [10.0, 20.0],
-            "delta_bic": [8.0, 18.0],
-            "custom_col": ["a", "b"],
-        })
-        result = compare_all_states(df)
-        assert "custom_col" in result.columns
-        assert list(result["custom_col"]) == ["a", "b"]
-
-    def test_preserves_row_count_and_order(self):
-        from queuediff.model_comparison import compare_all_states
-        df = pd.DataFrame({
-            "state": [2, 0, 1],
-            "exp_log_likelihood": [-100.0, -200.0, -150.0],
-            "gamma_log_likelihood": [-90.0, -190.0, -140.0],
-        })
-        result = compare_all_states(df)
-        assert len(result) == 3
-        assert list(result["state"]) == [2, 0, 1]
-
-    def test_raises_on_missing_required_columns(self):
-        from queuediff.model_comparison import compare_all_states
-        df = pd.DataFrame({"state": [0, 1]})  # missing log-likelihood cols
-        with pytest.raises(ValueError, match="Missing required columns"):
-            compare_all_states(df)
+@pytest.fixture
+def residence_times_mixed():
+    """Mix of gamma and exponential residence times."""
+    rng = np.random.default_rng(42)
+    return {
+        "StateA": rng.gamma(shape=15, scale=1.2, size=300),
+        "StateB": rng.exponential(scale=10.0, size=300),
+    }
 
 
-# ---------------------------------------------------------------------------
-# apply_fdr_correction  —  Benjamini-Hochberg correction
-# ---------------------------------------------------------------------------
-
-class TestApplyFDRCorrection:
-    def test_adds_corrected_and_significant_columns(self):
-        from queuediff.model_comparison import apply_fdr_correction
-        df = pd.DataFrame({
-            "state": [0, 1, 2],
-            "p_value": [0.01, 0.03, 0.2],
-        })
-        result = apply_fdr_correction(df, alpha=0.05)
-        assert "p_value_corrected" in result.columns
-        assert "significant" in result.columns
-
-    def test_corrected_p_value_ge_original(self):
-        from queuediff.model_comparison import apply_fdr_correction
-        df = pd.DataFrame({
-            "state": [0, 1, 2],
-            "p_value": [0.01, 0.03, 0.2],
-        })
-        result = apply_fdr_correction(df, alpha=0.05)
-        # BH correction is conservative: p_corrected >= p_original
-        for orig, corr in zip(df["p_value"], result["p_value_corrected"]):
-            assert corr >= orig - 1e-10
-
-    def test_significant_column_is_boolean(self):
-        from queuediff.model_comparison import apply_fdr_correction
-        df = pd.DataFrame({
-            "state": [0, 1],
-            "p_value": [0.01, 0.2],
-        })
-        result = apply_fdr_correction(df, alpha=0.05)
-        assert result["significant"].dtype == bool
-        assert result["significant"].iloc[0] == True
-        assert result["significant"].iloc[1] == False
-
-    def test_behavior_at_alpha_boundary(self):
-        from queuediff.model_comparison import apply_fdr_correction
-        # p_value exactly at alpha should not be significant (< alpha, not <=)
-        df = pd.DataFrame({
-            "state": [0],
-            "p_value": [0.05],
-        })
-        result = apply_fdr_correction(df, alpha=0.05)
-        # With 1 test, corrected p = 0.05, significant = (0.05 < 0.05) = False
-        assert result["significant"].iloc[0] == False
-
-    def test_multiple_tests_bh_ordering(self):
-        from queuediff.model_comparison import apply_fdr_correction
-        df = pd.DataFrame({
-            "state": [0, 1, 2, 3, 4],
-            "p_value": [0.001, 0.01, 0.03, 0.04, 0.2],
-        })
-        result = apply_fdr_correction(df, alpha=0.05)
-        # BH: sorted p = [0.001, 0.01, 0.03, 0.04, 0.2]
-        # critical = [0.01, 0.02, 0.03, 0.04, 0.05] (alpha * i / m)
-        # 0.001 <= 0.01: significant
-        # 0.01 <= 0.02: significant
-        # 0.03 <= 0.03: significant
-        # 0.04 <= 0.04: significant
-        # 0.2 > 0.05: not significant
-        assert result["significant"].sum() == 4
-
-    def test_raises_on_missing_p_value_column(self):
-        from queuediff.model_comparison import apply_fdr_correction
-        df = pd.DataFrame({"state": [0, 1]})
-        with pytest.raises(ValueError, match="must have 'p_value' column"):
-            apply_fdr_correction(df)
-
-    def test_preserves_other_columns(self):
-        from queuediff.model_comparison import apply_fdr_correction
-        df = pd.DataFrame({
-            "state": [0, 1],
-            "p_value": [0.01, 0.2],
-            "delta_aic": [10.0, 5.0],
-            "custom": ["x", "y"],
-        })
-        result = apply_fdr_correction(df, alpha=0.05)
-        assert "delta_aic" in result.columns
-        assert "custom" in result.columns
-        assert list(result["delta_aic"]) == [10.0, 5.0]
-
-
-# ---------------------------------------------------------------------------
-# identify_significant_bottlenecks  —  filter and sort significant states
-# ---------------------------------------------------------------------------
-
-class TestIdentifySignificantBottlenecks:
-    def test_returns_only_significant_rows(self):
-        from queuediff.model_comparison import identify_significant_bottlenecks
-        df = pd.DataFrame({
-            "state": [0, 1, 2, 3],
-            "delta_aic": [10.0, 100.0, 50.0, 5.0],
-            "p_value": [0.2, 0.001, 0.01, 0.5],
-        })
-        result = identify_significant_bottlenecks(df, alpha=0.05)
-        assert len(result) == 2
-        assert set(result["state"]) == {1, 2}
-
-    def test_sorted_by_delta_aic_descending(self):
-        from queuediff.model_comparison import identify_significant_bottlenecks
-        df = pd.DataFrame({
-            "state": [0, 1, 2],
-            "delta_aic": [10.0, 100.0, 50.0],
-            "p_value": [0.2, 0.001, 0.01],
-        })
-        result = identify_significant_bottlenecks(df, alpha=0.05)
-        assert list(result["delta_aic"]) == [100.0, 50.0]
-
-    def test_returns_empty_dataframe_when_none_significant(self):
-        from queuediff.model_comparison import identify_significant_bottlenecks
-        df = pd.DataFrame({
-            "state": [0, 1],
-            "delta_aic": [10.0, 5.0],
-            "p_value": [0.2, 0.5],
-        })
-        result = identify_significant_bottlenecks(df, alpha=0.05)
+class TestCompareModelsPerState:
+    def test_returns_dataframe(self, residence_times_gamma):
+        result = compare_models_per_state(residence_times_gamma)
         assert isinstance(result, pd.DataFrame)
+
+    def test_correct_columns(self, residence_times_gamma):
+        result = compare_models_per_state(residence_times_gamma)
+        expected = {
+            "state", "n_samples", "gamma_shape", "gamma_scale", "gamma_mean",
+            "gamma_variance", "exp_scale", "exp_mean", "gamma_aic", "exp_aic",
+            "delta_aic", "gamma_bic", "exp_bic", "delta_bic",
+            "lr_statistic", "lr_pvalue", "gamma_loglik", "exp_loglik",
+        }
+        assert set(result.columns) == expected
+
+    def test_one_row_per_state(self, residence_times_gamma):
+        result = compare_models_per_state(residence_times_gamma)
+        assert len(result) == 3
+
+    def test_delta_aic_positive_for_gamma_data(self, residence_times_gamma):
+        """ΔAIC should be positive (favoring gamma) when data is gamma."""
+        result = compare_models_per_state(residence_times_gamma)
+        assert (result["delta_aic"] > 2.0).all()
+
+    def test_skips_small_samples(self):
+        times = {"StateA": np.array([1.0, 2.0, 3.0])}
+        result = compare_models_per_state(times, min_samples=10)
         assert len(result) == 0
-        # Should have same columns as input plus correction columns
-        assert "p_value_corrected" in result.columns
-        assert "significant" in result.columns
-
-    def test_runs_fdr_internally_if_not_already_corrected(self):
-        from queuediff.model_comparison import identify_significant_bottlenecks
-        df = pd.DataFrame({
-            "state": [0, 1, 2],
-            "delta_aic": [10.0, 100.0, 50.0],
-            "p_value": [0.2, 0.001, 0.01],
-            # No 'significant' or 'p_value_corrected' columns
-        })
-        result = identify_significant_bottlenecks(df, alpha=0.05)
-        assert len(result) == 2
-        assert set(result["state"]) == {1, 2}
-
-    def test_end_to_end_bottleneck_detection_on_synthetic_data(self):
-        from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
-        from queuediff.distribution_fitting import fit_all_states
-        from queuediff.model_comparison import compare_all_states, apply_fdr_correction, identify_significant_bottlenecks
-
-        # Create hierarchy with bottleneck at state 1
-        hierarchy = generate_hierarchy(
-            n_states=5,
-            branching_structure={1: [2, 3], 2: [4]},
-            seed=42
-        )
-
-        gamma_params = {
-            0: (2.0, 1.0),
-            1: (2.0, 1.5),  # bottleneck state, true shape=2.0
-            2: (3.0, 1.0),
-            3: (2.0, 2.0),
-            4: (4.0, 1.0),
-        }
-
-        # Simulate with strong bottleneck at state 1
-        df = simulate_cells(
-            hierarchy=hierarchy,
-            n_cells=2000,
-            gamma_params_per_state=gamma_params,
-            bottleneck_state=1,
-            bottleneck_severity=3.0,  # inflates shape to 6.0
-            seed=123
-        )
-
-        # Full pipeline
-        fit_df = fit_all_states(df)
-        comparison_df = compare_all_states(fit_df)
-        corrected_df = apply_fdr_correction(comparison_df, alpha=0.05)
-        bottlenecks = identify_significant_bottlenecks(corrected_df, alpha=0.05)
-
-        # Bottleneck state 1 should be detected
-        assert len(bottlenecks) >= 1
-        assert 1 in bottlenecks["state"].values
-        # State 1 should have the largest effect size (delta_aic)
-        assert bottlenecks.iloc[0]["state"] == 1
 
 
-# ---------------------------------------------------------------------------
-# Integration with distribution_fitting
-# ---------------------------------------------------------------------------
+class TestApplyFdrCorrection:
+    def test_adds_fdr_columns(self, residence_times_gamma):
+        comparison = compare_models_per_state(residence_times_gamma)
+        result = apply_fdr_correction(comparison)
+        assert "fdr_pvalue" in result.columns
+        assert "gamma_preferred" in result.columns
 
-class TestIntegrationWithDistributionFitting:
-    def test_full_pipeline_synthetic_bottleneck_recovery(self):
-        from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
-        from queuediff.distribution_fitting import fit_all_states
-        from queuediff.model_comparison import compare_all_states, apply_fdr_correction, identify_significant_bottlenecks
+    def test_gamma_preferred_for_gamma_data(self, residence_times_gamma):
+        comparison = compare_models_per_state(residence_times_gamma)
+        result = apply_fdr_correction(comparison)
+        assert result["gamma_preferred"].all()
 
-        hierarchy = generate_hierarchy(
-            n_states=5,
-            branching_structure={1: [2, 3], 2: [4]},
-            seed=42
-        )
+    def test_handles_empty_dataframe(self):
+        empty = pd.DataFrame()
+        result = apply_fdr_correction(empty)
+        assert len(result) == 0
 
-        gamma_params = {
-            0: (2.0, 1.0),
-            1: (2.0, 1.5),
-            2: (3.0, 1.0),
-            3: (2.0, 2.0),
-            4: (4.0, 1.0),
-        }
+    def test_mixed_data_classification(self, residence_times_mixed):
+        """Gamma data should be classified as gamma-preferred."""
+        comparison = compare_models_per_state(residence_times_mixed)
+        result = apply_fdr_correction(comparison)
+        # StateA (gamma with shape=15) should prefer gamma
+        state_a = result[result["state"] == "StateA"]
+        assert state_a["gamma_preferred"].values[0]
+        # StateA should have high gamma shape (k >> 1)
+        assert state_a["gamma_shape"].values[0] > 5.0
 
-        # With bottleneck
-        df = simulate_cells(
-            hierarchy=hierarchy,
-            n_cells=2000,
-            gamma_params_per_state=gamma_params,
-            bottleneck_state=1,
-            bottleneck_severity=3.0,
-            seed=123
-        )
 
-        fit_df = fit_all_states(df)
-        comparison_df = compare_all_states(fit_df)
-        corrected_df = apply_fdr_correction(comparison_df, alpha=0.05)
-        bottlenecks = identify_significant_bottlenecks(corrected_df, alpha=0.05)
+class TestSummarizeModelComparison:
+    def test_returns_string(self, residence_times_gamma):
+        comparison = compare_models_per_state(residence_times_gamma)
+        corrected = apply_fdr_correction(comparison)
+        summary = summarize_model_comparison(corrected)
+        assert isinstance(summary, str)
+        assert "GAMMA" in summary or "gamma" in summary.lower()
 
-        # Bottleneck state should be flagged
-        assert 1 in bottlenecks["state"].values
-        # Should have the largest delta_aic
-        assert bottlenecks.iloc[0]["state"] == 1
-
-    def test_full_pipeline_fdr_control_on_null_data(self):
-        from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
-        from queuediff.distribution_fitting import fit_all_states
-        from queuediff.model_comparison import compare_all_states, apply_fdr_correction
-
-        hierarchy = generate_hierarchy(
-            n_states=5,
-            branching_structure={1: [2, 3], 2: [4]},
-            seed=42
-        )
-
-        # All states exponential (shape=1.0) - null hypothesis true everywhere
-        exp_params = {s: (1.0, 1.0) for s in range(5)}
-
-        df = simulate_cells(
-            hierarchy=hierarchy,
-            n_cells=2000,
-            gamma_params_per_state=exp_params,
-            bottleneck_state=1,
-            bottleneck_severity=1.0,  # No bottleneck
-            seed=456
-        )
-
-        fit_df = fit_all_states(df)
-        comparison_df = compare_all_states(fit_df)
-        corrected_df = apply_fdr_correction(comparison_df, alpha=0.05)
-
-        # FDR should control false positives
-        n_significant = corrected_df["significant"].sum()
-        # With 5 states at alpha=0.05, expect at most 1 false positive typically
-        assert n_significant <= 1
+    def test_contains_state_names(self, residence_times_gamma):
+        comparison = compare_models_per_state(residence_times_gamma)
+        corrected = apply_fdr_correction(comparison)
+        summary = summarize_model_comparison(corrected)
+        for state in ["StateA", "StateB", "StateC"]:
+            assert state in summary

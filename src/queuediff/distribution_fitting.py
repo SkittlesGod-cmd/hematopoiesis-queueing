@@ -1,429 +1,212 @@
-"""Distribution fitting for residence times: exponential vs gamma MLE with AIC/BIC comparison.
+"""Distribution fitting: MLE fitting of gamma and exponential distributions.
 
-This module is the statistical core that determines whether the semi-Markov
-(gamma) model beats the classical (exponential) baseline for each state.
+Fits residence time distributions to gamma and exponential models using
+maximum likelihood estimation (scipy.stats). Provides AIC/BIC for model
+comparison and likelihood ratio test for nested model comparison.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
-import pandas as pd
 from scipy import stats
-from typing import Dict, Optional
 
 
-def extract_residence_times(cell_df: pd.DataFrame, state: int) -> np.ndarray:
-    """Extract residence times for a specific state from simulated cell DataFrame.
+@dataclass
+class FitResult:
+    """Result of fitting a distribution to data.
+
+    Attributes
+    ----------
+    distribution : str
+        Name of the fitted distribution ('gamma' or 'exponential').
+    params : dict[str, float]
+        Fitted parameters. For gamma: {'shape': k, 'loc': loc, 'scale': theta}.
+        For exponential: {'loc': loc, 'scale': theta}.
+    n_params : int
+        Number of free parameters (used for AIC/BIC).
+    loglik : float
+        Log-likelihood at MLE.
+    aic : float
+        Akaike Information Criterion: 2*k - 2*loglik.
+    bic : float
+        Bayesian Information Criterion: k*ln(n) - 2*loglik.
+    n_samples : int
+        Number of data points used in fitting.
+    mean : float
+        Mean of the fitted distribution (hours).
+    variance : float
+        Variance of the fitted distribution.
+    """
+
+    distribution: str
+    params: dict[str, float]
+    n_params: int
+    loglik: float
+    aic: float
+    bic: float
+    n_samples: int
+    mean: float
+    variance: float
+
+
+def fit_gamma(data: np.ndarray, floc: float = 0.0) -> FitResult:
+    """Fit a gamma distribution to residence time data via MLE.
 
     Parameters
     ----------
-    cell_df : pandas.DataFrame
-        DataFrame from synthetic_generator.simulate_cells with columns:
-        cell_id, state, entry_time, exit_time, next_state.
-    state : int
-        State index to filter for.
+    data : ndarray
+        Positive residence times in hours. Must have len >= 3.
+    floc : float, default 0.0
+        Fixed location parameter. Residence times are non-negative
+        with natural origin at 0.
 
     Returns
     -------
-    numpy.ndarray
-        Array of residence times (exit_time - entry_time) for all rows
-        where state matches. Empty array if state not found.
+    FitResult
+        Fitted gamma distribution parameters and diagnostics.
+
+    Notes
+    -----
+    Gamma parameterization: shape k, scale theta.
+    Mean = k * theta, Variance = k * theta^2.
+    When k=1, gamma reduces to exponential (the nested model).
     """
-    mask = cell_df['state'] == state
-    if not mask.any():
-        return np.array([])
-    return (cell_df.loc[mask, 'exit_time'] - cell_df.loc[mask, 'entry_time']).to_numpy()
+    data = np.asarray(data, dtype=np.float64)
+    _validate_data(data)
 
+    # MLE fit with fixed location
+    shape, loc, scale = stats.gamma.fit(data, floc=floc)
+    n = len(data)
 
-def fit_exponential(residence_times: np.ndarray) -> Dict[str, float]:
-    """Fit exponential distribution to residence times via MLE (fixed loc=0).
+    # Log-likelihood
+    loglik = float(np.sum(stats.gamma.logpdf(data, a=shape, loc=loc, scale=scale)))
 
-    Parameters
-    ----------
-    residence_times : numpy.ndarray
-        Array of non-negative residence times.
+    # Number of free parameters: shape + scale (loc is fixed)
+    n_params = 2
+    aic = 2 * n_params - 2 * loglik
+    bic = n_params * np.log(n) - 2 * loglik
 
-    Returns
-    -------
-    dict
-        Contains: rate (1/scale), log_likelihood, aic, bic, n_obs.
-        k=1 free parameter (rate).
-        If fewer than 2 valid observations, returns dict with all numeric
-        fields set to np.nan and n_obs set to actual count.
-    """
-    # Drop NaN values
-    clean_times = residence_times[~np.isnan(residence_times)]
-    n = len(clean_times)
+    mean = shape * scale
+    variance = shape * scale**2
 
-    # If fewer than 2 points, return NaN-filled dict
-    if n < 2:
-        return {
-            'rate': np.nan,
-            'scale': np.nan,
-            'log_likelihood': np.nan,
-            'loglik': np.nan,
-            'aic': np.nan,
-            'bic': np.nan,
-            'n_obs': n,
-            'n': n
-        }
-
-    if n < 10:
-        raise ValueError(f"Need at least 10 observations for MLE, got {n}")
-
-    # scipy.stats.expon.fit with floc=0 fixes location at 0, returns (loc, scale)
-    # Since we fix loc=0, scale is the MLE estimate of 1/rate
-    _, scale = stats.expon.fit(clean_times, floc=0)
-    rate = 1.0 / scale
-
-    # Log-likelihood for exponential: sum(log(rate * exp(-rate * x)))
-    # = n * log(rate) - rate * sum(x)
-    log_likelihood = n * np.log(rate) - rate * np.sum(clean_times)
-
-    k = 1  # one free parameter: rate
-    aic = 2 * k - 2 * log_likelihood
-    bic = k * np.log(n) - 2 * log_likelihood
-
-    return {
-        'rate': rate,
-        'scale': scale,
-        'log_likelihood': log_likelihood,
-        'loglik': log_likelihood,
-        'aic': aic,
-        'bic': bic,
-        'n_obs': n,
-        'n': n
-    }
-
-
-def fit_gamma(residence_times: np.ndarray) -> Dict[str, float]:
-    """Fit gamma distribution to residence times via MLE (fixed loc=0).
-
-    Parameters
-    ----------
-    residence_times : numpy.ndarray
-        Array of non-negative residence times.
-
-    Returns
-    -------
-    dict
-        Contains: shape, scale, log_likelihood, aic, bic, n_obs.
-        k=2 free parameters (shape and scale).
-        If fewer than 2 valid observations, returns dict with all numeric
-        fields set to np.nan and n_obs set to actual count.
-    """
-    # Drop NaN values
-    clean_times = residence_times[~np.isnan(residence_times)]
-    n = len(clean_times)
-
-    # If fewer than 2 points, return NaN-filled dict
-    if n < 2:
-        return {
-            'shape': np.nan,
-            'scale': np.nan,
-            'log_likelihood': np.nan,
-            'loglik': np.nan,
-            'aic': np.nan,
-            'bic': np.nan,
-            'n_obs': n,
-            'n': n
-        }
-
-    if n < 10:
-        raise ValueError(f"Need at least 10 observations for MLE, got {n}")
-
-    # scipy.stats.gamma.fit with floc=0 fixes location at 0, returns (shape, loc, scale)
-    shape, _, scale = stats.gamma.fit(clean_times, floc=0)
-
-    # Log-likelihood for gamma using scipy's logpdf
-    log_likelihood = np.sum(stats.gamma.logpdf(clean_times, shape, loc=0, scale=scale))
-
-    k = 2  # two free parameters: shape and scale
-    aic = 2 * k - 2 * log_likelihood
-    bic = k * np.log(n) - 2 * log_likelihood
-
-    return {
-        'shape': shape,
-        'scale': scale,
-        'log_likelihood': log_likelihood,
-        'loglik': log_likelihood,
-        'aic': aic,
-        'bic': bic,
-        'n_obs': n,
-        'n': n
-    }
-
-
-def aic(log_likelihood: float, k: int) -> float:
-    """Compute Akaike Information Criterion.
-
-    AIC = 2k - 2*log_likelihood
-
-    Parameters
-    ----------
-    log_likelihood : float
-        Log-likelihood of the fitted model.
-    k : int
-        Number of free parameters in the model.
-
-    Returns
-    -------
-    float
-        AIC value (lower is better).
-    """
-    return 2 * k - 2 * log_likelihood
-
-
-def bic(log_likelihood: float, k: int, n: int) -> float:
-    """Compute Bayesian Information Criterion.
-
-    BIC = k*ln(n) - 2*log_likelihood
-
-    Parameters
-    ----------
-    log_likelihood : float
-        Log-likelihood of the fitted model.
-    k : int
-        Number of free parameters in the model.
-    n : int
-        Number of observations.
-
-    Returns
-    -------
-    float
-        BIC value (lower is better).
-    """
-    return k * np.log(n) - 2 * log_likelihood
-
-
-def fit_distributions_to_state(residence_times: np.ndarray) -> Dict:
-    """Fit both exponential and gamma distributions to residence times.
-
-    This is a convenience function that takes raw residence time data
-    (not a cell DataFrame) and returns combined fit results.
-
-    Parameters
-    ----------
-    residence_times : numpy.ndarray
-        Array of non-negative residence times.
-
-    Returns
-    -------
-    dict
-        Keys: 'n_obs', 'gamma_shape', 'gamma_scale', 'gamma_loglik',
-        'exp_rate', 'exp_loglik', 'gamma_aic', 'exp_aic',
-        'gamma_bic', 'exp_bic', 'delta_aic', 'delta_bic'.
-    """
-    if len(residence_times) < 10:
-        raise ValueError(f"Need at least 10 observations for MLE, got {len(residence_times)}")
-
-    exp_fit = fit_exponential(residence_times)
-    gamma_fit = fit_gamma(residence_times)
-
-    return {
-        'n_obs': exp_fit['n_obs'],
-        'gamma_shape': gamma_fit['shape'],
-        'gamma_scale': gamma_fit['scale'],
-        'gamma_loglik': gamma_fit['log_likelihood'],
-        'exp_rate': exp_fit['rate'],
-        'exp_loglik': exp_fit['log_likelihood'],
-        'gamma_aic': gamma_fit['aic'],
-        'exp_aic': exp_fit['aic'],
-        'gamma_bic': gamma_fit['bic'],
-        'exp_bic': exp_fit['bic'],
-        'delta_aic': exp_fit['aic'] - gamma_fit['aic'],
-        'delta_bic': exp_fit['bic'] - gamma_fit['bic']
-    }
-
-
-def fit_state_distributions(cell_df: pd.DataFrame, state: int) -> Dict:
-    """Fit both exponential and gamma distributions for a single state.
-
-    Parameters
-    ----------
-    cell_df : pandas.DataFrame
-        Simulated cell DataFrame from synthetic_generator.simulate_cells.
-    state : int
-        State index to fit distributions for.
-
-    Returns
-    -------
-    dict
-        Keys: 'exponential' (fit dict), 'gamma' (fit dict),
-        'delta_aic' (exp_aic - gamma_aic; positive => gamma better),
-        'delta_bic' (exp_bic - gamma_bic; positive => gamma better).
-    """
-    residence_times = extract_residence_times(cell_df, state)
-
-    if len(residence_times) < 10:
-        raise ValueError(f"State {state} has only {len(residence_times)} observations (< 10 minimum)")
-
-    exp_fit = fit_exponential(residence_times)
-    gamma_fit = fit_gamma(residence_times)
-
-    return {
-        'exponential': exp_fit,
-        'gamma': gamma_fit,
-        'delta_aic': exp_fit['aic'] - gamma_fit['aic'],
-        'delta_bic': exp_fit['bic'] - gamma_fit['bic']
-    }
-
-
-def fit_all_states(
-    cell_df: pd.DataFrame,
-    state_col: str = 'state',
-    time_col: Optional[str] = None
-) -> pd.DataFrame:
-    """Fit distributions for all unique states in the DataFrame.
-
-    Parameters
-    ----------
-    cell_df : pandas.DataFrame
-        DataFrame containing residence time data.
-    state_col : str, default='state'
-        Column name containing state identifiers.
-    time_col : str, optional
-        Column name containing residence times. If None, tries to find
-        'residence_time' column, otherwise computes residence time from
-        'entry_time' and 'exit_time' columns (as produced by
-        synthetic_generator.simulate_cells).
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per state with flattened fit results columns.
-    """
-    # Preserve order of first appearance instead of sorting
-    _, idx = np.unique(cell_df[state_col], return_index=True)
-    states = cell_df[state_col].iloc[np.sort(idx)].unique()
-    rows = []
-
-    for state in states:
-        mask = cell_df[state_col] == state
-
-        if time_col is not None:
-            # User provided explicit residence time column
-            residence_times = cell_df.loc[mask, time_col].to_numpy()
-        elif 'residence_time' in cell_df.columns:
-            # Auto-detect residence_time column
-            residence_times = cell_df.loc[mask, 'residence_time'].to_numpy()
-        elif 'entry_time' in cell_df.columns and 'exit_time' in cell_df.columns:
-            # Default: compute residence time from entry_time and exit_time
-            residence_times = (
-                cell_df.loc[mask, 'exit_time'] - cell_df.loc[mask, 'entry_time']
-            ).to_numpy()
-        else:
-            raise ValueError(
-                "No residence time column found. Provide time_col or ensure "
-                "DataFrame has 'residence_time' or 'entry_time'/'exit_time' columns."
-            )
-
-        if len(residence_times) < 10:
-            raise ValueError(f"State {state} has only {len(residence_times)} observations (< 10 minimum)")
-
-        fit_result = fit_distributions_to_state(residence_times)
-
-        rows.append({
-            'state': state,
-            'n_obs': fit_result['n_obs'],
-            'exp_rate': fit_result['exp_rate'],
-            'exp_log_likelihood': fit_result['exp_loglik'],
-            'exp_aic': fit_result['exp_aic'],
-            'exp_bic': fit_result['exp_bic'],
-            'exp_n_obs': fit_result['n_obs'],
-            'gamma_shape': fit_result['gamma_shape'],
-            'gamma_scale': fit_result['gamma_scale'],
-            'gamma_log_likelihood': fit_result['gamma_loglik'],
-            'gamma_aic': fit_result['gamma_aic'],
-            'gamma_bic': fit_result['gamma_bic'],
-            'gamma_n_obs': fit_result['n_obs'],
-            'delta_aic': fit_result['delta_aic'],
-            'delta_bic': fit_result['delta_bic']
-        })
-
-    return pd.DataFrame(rows)
-
-
-if __name__ == "__main__":
-    """Sanity check: fit distributions to synthetic data with known bottleneck."""
-    print("=" * 70)
-    print("DISTRIBUTION FITTING SANITY CHECK")
-    print("=" * 70)
-
-    from queuediff.synthetic_generator import generate_hierarchy, simulate_cells
-
-    # Same 5-state hierarchy as synthetic_generator's sanity check
-    hierarchy = generate_hierarchy(
-        n_states=5,
-        branching_structure={1: [2, 3], 2: [4]},
-        seed=42
+    return FitResult(
+        distribution="gamma",
+        params={"shape": float(shape), "loc": float(loc), "scale": float(scale)},
+        n_params=n_params,
+        loglik=loglik,
+        aic=float(aic),
+        bic=float(bic),
+        n_samples=n,
+        mean=float(mean),
+        variance=float(variance),
     )
 
-    gamma_params = {
-        0: (2.0, 1.0),   # Stem: mean=2.0, shape=2.0
-        1: (2.0, 1.5),   # Myeloid-Primed: mean=3.0, shape=2.0
-        2: (3.0, 1.0),   # Lymphoid-Primed: mean=3.0, shape=3.0
-        3: (2.0, 2.0),   # Myeloid-Committed: mean=4.0, shape=2.0
-        4: (4.0, 1.0),   # Lymphoid-Committed: mean=4.0, shape=4.0
-    }
 
-    # Bottleneck at state 1 with severity 3.0 -> true shape = 2.0 * 3.0 = 6.0
-    bottleneck_state = 1
-    bottleneck_severity = 3.0
-    true_shape_at_bottleneck = gamma_params[bottleneck_state][0] * bottleneck_severity
+def fit_exponential(data: np.ndarray, floc: float = 0.0) -> FitResult:
+    """Fit an exponential distribution to residence time data via MLE.
 
-    df = simulate_cells(
-        hierarchy=hierarchy,
-        n_cells=2000,
-        gamma_params_per_state=gamma_params,
-        bottleneck_state=bottleneck_state,
-        bottleneck_severity=bottleneck_severity,
-        seed=123
+    Parameters
+    ----------
+    data : ndarray
+        Positive residence times in hours. Must have len >= 2.
+    floc : float, default 0.0
+        Fixed location parameter.
+
+    Returns
+    -------
+    FitResult
+        Fitted exponential distribution parameters and diagnostics.
+
+    Notes
+    -----
+    Exponential is gamma with shape=1.
+    Mean = scale (= 1/rate), Variance = scale^2.
+    """
+    data = np.asarray(data, dtype=np.float64)
+    _validate_data(data)
+
+    # MLE fit with fixed location
+    loc, scale = stats.expon.fit(data, floc=floc)
+    n = len(data)
+
+    # Log-likelihood
+    loglik = float(np.sum(stats.expon.logpdf(data, loc=loc, scale=scale)))
+
+    # Number of free parameters: scale only (loc is fixed)
+    n_params = 1
+    aic = 2 * n_params - 2 * loglik
+    bic = n_params * np.log(n) - 2 * loglik
+
+    mean = scale
+    variance = scale**2
+
+    return FitResult(
+        distribution="exponential",
+        params={"loc": float(loc), "scale": float(scale)},
+        n_params=n_params,
+        loglik=loglik,
+        aic=float(aic),
+        bic=float(bic),
+        n_samples=n,
+        mean=float(mean),
+        variance=float(variance),
     )
 
-    # Fit all states
-    fit_df = fit_all_states(df)
-    print(f"\nFit results for {len(fit_df)} states:")
-    print(fit_df.to_string(index=False))
 
-    print("\n" + "=" * 70)
-    print("VALIDATION CHECKS")
-    print("=" * 70)
+def likelihood_ratio_test(
+    fit_null: FitResult,
+    fit_alt: FitResult,
+) -> tuple[float, float]:
+    """Likelihood ratio test comparing nested models.
 
-    # Check 1: Fitted gamma shape at bottleneck state matches injected shape
-    bottleneck_row = fit_df[fit_df['state'] == bottleneck_state].iloc[0]
-    fitted_shape = bottleneck_row['gamma_shape']
-    shape_error = abs(fitted_shape - true_shape_at_bottleneck) / true_shape_at_bottleneck
-    print(f"\n1. Gamma shape at bottleneck state {bottleneck_state}:")
-    print(f"   True injected shape: {true_shape_at_bottleneck:.2f}")
-    print(f"   Fitted shape:        {fitted_shape:.2f}")
-    print(f"   Relative error:      {shape_error*100:.1f}%")
-    shape_pass = shape_error < 0.15  # within 15% is reasonable for MLE
-    print(f"   PASS" if shape_pass else f"   FAIL")
+    Tests H0: exponential (null, restricted) vs H1: gamma (alternative, general).
+    Gamma nests exponential at shape=1.
 
-    # Check 2: delta_aic favors gamma at bottleneck more strongly than other states
-    print(f"\n2. Model comparison (delta_aic = exp_aic - gamma_aic; positive => gamma better):")
-    for _, row in fit_df.iterrows():
-        marker = " <-- BOTTLENECK" if row['state'] == bottleneck_state else ""
-        print(f"   State {int(row['state'])}: delta_aic = {row['delta_aic']:.2f}, delta_bic = {row['delta_bic']:.2f}{marker}")
+    Parameters
+    ----------
+    fit_null : FitResult
+        Null model fit (exponential, fewer parameters).
+    fit_alt : FitResult
+        Alternative model fit (gamma, more parameters).
 
-    bottleneck_delta_aic = bottleneck_row['delta_aic']
-    other_states = fit_df[fit_df['state'] != bottleneck_state]
-    max_other_delta_aic = other_states['delta_aic'].max()
+    Returns
+    -------
+    tuple[float, float]
+        (test_statistic, p_value). Test statistic is -2*(loglik_null - loglik_alt).
+        P-value from chi-squared distribution with df = difference in parameters.
 
-    aic_check = bottleneck_delta_aic > max_other_delta_aic
-    print(f"\n   Bottleneck delta_aic ({bottleneck_delta_aic:.2f}) > max other delta_aic ({max_other_delta_aic:.2f})?")
-    print(f"   PASS" if aic_check else f"   FAIL")
+    Notes
+    -----
+    Valid when models are nested and sample sizes are the same.
+    The test statistic follows chi-squared under H0 (Wilks' theorem).
+    """
+    assert fit_null.n_samples == fit_alt.n_samples, (
+        "Both fits must use the same data (same n_samples)."
+    )
+    assert fit_null.n_params < fit_alt.n_params, (
+        "Null model must have fewer parameters than alternative."
+    )
 
-    # Check 3: delta_bic also favors gamma at bottleneck
-    bottleneck_delta_bic = bottleneck_row['delta_bic']
-    max_other_delta_bic = other_states['delta_bic'].max()
-    bic_check = bottleneck_delta_bic > max_other_delta_bic
-    print(f"\n   Bottleneck delta_bic ({bottleneck_delta_bic:.2f}) > max other delta_bic ({max_other_delta_bic:.2f})?")
-    print(f"   PASS" if bic_check else f"   FAIL")
+    lr_stat = -2.0 * (fit_null.loglik - fit_alt.loglik)
+    # Clamp to 0 (can be slightly negative due to numerical issues)
+    lr_stat = max(0.0, lr_stat)
 
-    # Overall
-    all_pass = shape_pass and aic_check and bic_check
-    print("\n" + "=" * 70)
-    print(f"OVERALL: {'PASS' if all_pass else 'FAIL'}")
-    print("=" * 70)
+    df = fit_alt.n_params - fit_null.n_params
+    p_value = float(stats.chi2.sf(lr_stat, df=df))
+
+    return float(lr_stat), p_value
+
+
+# ── Private helpers ───────────────────────────────────────────────────────────
+
+
+def _validate_data(data: np.ndarray) -> None:
+    """Validate input data for distribution fitting."""
+    if len(data) < 2:
+        raise ValueError(f"Need at least 2 data points for fitting, got {len(data)}.")
+    if np.any(data <= 0):
+        raise ValueError("All residence times must be strictly positive.")
+    if np.any(~np.isfinite(data)):
+        raise ValueError("Data contains non-finite values (inf or nan).")

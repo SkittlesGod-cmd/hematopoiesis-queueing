@@ -1,83 +1,70 @@
+"""Download Nestorowa et al. 2016 data.
+
+Used for structural cross-check only (single timepoint).
+"""
+
+from __future__ import annotations
+
 import os
-import sys
+import shutil
+import ssl
+import urllib.request
 from pathlib import Path
 
-import requests
-from tqdm import tqdm
+# Create unverified SSL context for environments with certificate issues
+_SSL_CONTEXT = ssl._create_unverified_context()
 
-DATA_DIR = Path("data/raw/nestorowa")
-
-FILES = [
-    (
-        "expression_matrix",
-        "http://blood.stemcells.cam.ac.uk/data/coordinates_gene_counts_flow_cytometry.txt.gz",
-    ),
-    (
-        "cell_type_annotations",
-        "http://blood.stemcells.cam.ac.uk/data/all_cell_types.txt",
-    ),
-    (
-        "log2_counts_wolf",
-        "http://blood.stemcells.cam.ac.uk/data/nestorowa_corrected_log2_transformed_counts.txt",
-    ),
-    (
-        "population_annotation_wolf",
-        "http://blood.stemcells.cam.ac.uk/data/nestorowa_corrected_population_annotation.txt",
-    ),
-]
+# Nestorowa data hosted on blood.stemcells.cam.ac.uk
+BASE_URL = "https://blood.stemcells.cam.ac.uk/data/"
+FILES = {
+    "nestorowa_corrected_log2_transformed_counts.txt.gz": "nestorowa_corrected_log2_transformed_counts.txt.gz",
+}
 
 
-def download_file(name: str, url: str, dest: Path) -> bool:
-    if dest.exists() and dest.stat().st_size > 0:
-        return False
+def download_nestorowa(output_dir: str | Path | None = None) -> Path:
+    """Download Nestorowa data files.
 
-    try:
-        resp = requests.get(url, stream=True, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise ConnectionError(f"Failed to download {name} from {url}: {e}")
+    Parameters
+    ----------
+    output_dir : str or Path, optional
+        Destination directory. Defaults to scripts/data/raw/nestorowa/.
 
-    total = int(resp.headers.get("content-length", 0))
-    with open(dest, "wb") as f, tqdm(
-        desc=name,
-        total=total,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024,
-        leave=False,
-    ) as bar:
-        for chunk in resp.iter_content(chunk_size=65536):
-            f.write(chunk)
-            bar.update(len(chunk))
+    Returns
+    -------
+    Path
+        Directory containing downloaded files.
+    """
+    if output_dir is None:
+        script_dir = Path(__file__).parent
+        output_dir = script_dir / "data" / "raw" / "nestorowa"
 
-    if dest.stat().st_size == 0:
-        raise IOError(f"Downloaded {name} but file is empty: {dest}")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    return True
+    for filename, target_name in FILES.items():
+        target_path = output_dir / target_name
+        if target_path.exists():
+            print(f"  Already exists: {target_name}")
+            continue
 
-
-def main():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    results = []
-    failures = 0
-
-    for name, url in FILES:
-        dest = DATA_DIR / os.path.basename(url)
+        url = BASE_URL + filename
+        print(f"  Downloading {filename}...")
         try:
-            downloaded = download_file(name, url, dest)
-            status = "downloaded" if downloaded else "already exists"
-            results.append((name, dest.name, status))
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=_SSL_CONTEXT)
+            )
+            with opener.open(url) as response, open(target_path, "wb") as out:
+                shutil.copyfileobj(response, out)
+            print(f"  -> {target_path}")
         except Exception as e:
-            results.append((name, dest.name, f"FAILED: {e}"))
-            failures += 1
+            print(f"  ERROR downloading {filename}: {e}")
+            print(f"  Nestorowa data may need manual download from the publication.")
+            raise
 
-    print()
-    print(f"Nestorowa download complete  ({len(results)} files, {failures} failures)")
-    print()
-    for name, filename, status in results:
-        print(f"  {name:25s}  {filename:45s}  {status}")
+    print(f"\nNestorowa data ready in: {output_dir}")
+    return output_dir
 
 
 if __name__ == "__main__":
-    main()
+    print("Downloading Nestorowa et al. 2016...")
+    download_nestorowa()

@@ -1,365 +1,326 @@
-"""
-Weinreb et al. 2020 — full quantitative pipeline.
+"""Run the full queuediff pipeline on Weinreb et al. 2020 data.
 
-Loads the primary dataset, assigns states, estimates residence times via
-both clonal (barcode) and flux-based methods, fits service-time distributions,
-compares semi-Markov (gamma) vs. Markov (exponential) models, builds the
-queueing network, flags bottlenecks, and validates congestion at the monocyte
-branch point.
-
-Save paths are set to ``results/weinreb_*.csv``.
-
-Usage::
-
-    python scripts/run_pipeline_weinreb.py
+End-to-end: load -> preprocess -> discretize -> estimate residence times
+-> fit distributions -> build queueing network -> detect bottleneck.
 """
 
 from __future__ import annotations
 
+import os
+import sys
+import warnings
 from pathlib import Path
 
-import sys
-
-RESULTS_DIR = Path("results")
-DATA_DIR = Path("scripts/data/raw/weinreb")
+import numpy as np
+import pandas as pd
 
 
-def main() -> None:
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+def run_pipeline(
+    data_dir: str | Path,
+    output_dir: str | Path,
+    verbose: bool = True,
+) -> dict:
+    """Run the complete analysis pipeline.
 
-    # ------------------------------------------------------------------
-    # 1. Load raw data into an AnnData object
-    #
-    #    Inputs (from download_weinreb.py):
-    #       data/raw/weinreb/stateFate_inVitro_normed_counts.mtx.gz
-    #       data/raw/weinreb/stateFate_inVitro_gene_names.txt.gz
-    #       data/raw/weinreb/stateFate_inVitro_metadata.txt.gz
-    #
-    #    Returns:
-    #       adata  : AnnData, shape (n_cells, n_genes)
-    #                .X       = sparse count matrix  (cells × genes)
-    #                .var_names = gene symbols
-    #                .obs     = cell-level metadata (timepoint, clone info, …)
-    #                .obsm['clone_matrix'] = sparse barcode matrix  (cells × clones)
-    #
-    #    TODO: implemented in src/queuediff/data_loading.py
-    # ------------------------------------------------------------------
-    print("[1/9] Loading Weinreb raw data …")
-    try:
-        from queuediff.data_loading import load_weinreb
+    Parameters
+    ----------
+    data_dir : str or Path
+        Directory containing Weinreb data files.
+    output_dir : str or Path
+        Directory for output files (tables, reports).
+    verbose : bool
+        Print progress messages.
 
-        adata = load_weinreb(DATA_DIR)
-    except Exception as exc:
-        print(f"  FAILED to load data: {exc}", file=sys.stderr)
-        print(f"  Ensure files exist under {DATA_DIR} (run scripts/download_weinreb.py first)")
-        sys.exit(1)
+    Returns
+    -------
+    dict
+        Pipeline results including residence times, model comparison,
+        bottleneck ranking, and diagnostics.
+    """
+    from queuediff.data_loading import load_weinreb, preprocess_standard
+    from queuediff.state_discretization import (
+        assign_states,
+        calibrate_division_death_rates,
+        score_apoptosis,
+        score_cell_cycle,
+        score_marker_states,
+    )
+    from queuediff.clonal_residence_time import (
+        compute_normalized_arrival_rates,
+        compute_residence_time_summary,
+        estimate_residence_times_clonal,
+        extract_clone_trajectories,
+    )
+    from queuediff.flux_residence_time import (
+        compute_state_occupancy,
+        fit_transition_rates,
+        flux_residence_time_summary,
+        identify_degenerate_states,
+    )
+    from queuediff.distribution_fitting import fit_gamma, fit_exponential
+    from queuediff.model_comparison import (
+        apply_fdr_correction,
+        compare_models_per_state,
+        summarize_model_comparison,
+    )
+    from queuediff.queueing_network import build_from_data
+    from queuediff.bottleneck_diagnostics import (
+        compute_bottleneck_ranking,
+        generate_bottleneck_report,
+    )
+    from queuediff.branch_point_validation import (
+        estimate_routing_probabilities,
+        validate_branch_points,
+    )
 
-    print(f"  Cells × Genes  : {adata.n_obs} × {adata.n_vars}")
+    data_dir = Path(data_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 2. State discretization — marker-gene scoring + Leiden cross-check
-    #
-    #    Input:
-    #       adata        : AnnData (raw counts in .X)
-    #
-    #    Adds to adata:
-    #       adata.obs['marker_state']    : categorical, one of HSC/MPP/LMPP/CMP/MEP/GMP
-    #       adata.obs['leiden_cluster']  : categorical, Leiden cluster label
-    #       adata.uns['state_contingency'] : pd.crosstab(marker_state, leiden_cluster)
-    #
-    #    TODO: implemented in src/queuediff/state_discretization.py
-    #          (already written — loads, filters, normalises, log1p, HVG, PCA,
-    #           clusters via Leiden, and assigns marker states)
-    # ------------------------------------------------------------------
-    print("[2/9] Assigning states …")
-    try:
-        from queuediff.state_discretization import run_from_adata as run_state_discretization
+    results = {}
 
-        adata = run_state_discretization(
-            adata,
-            min_genes=200,
-            min_cells=3,
-            n_top_genes=2000,
-            n_pcs=30,
-            leiden_resolution=1.0,
-        )
-    except Exception as exc:
-        print(f"  FAILED state discretisation: {exc}", file=sys.stderr)
-        sys.exit(1)
+    # ── Step 1: Load data ─────────────────────────────────────────────────
+    if verbose:
+        print("Step 1: Loading Weinreb data...")
+    adata = load_weinreb(data_dir, include_clones=True)
+    if verbose:
+        print(f"  Loaded: {adata.shape[0]} cells × {adata.shape[1]} genes")
+        print(f"  Timepoints: {sorted(adata.obs['Time_point'].unique())}")
 
-    n_states = adata.obs["marker_state"].nunique()
-    n_clusters = adata.obs["leiden_cluster"].nunique()
-    print(f"  Marker states   : {n_states}")
-    print(f"  Leiden clusters : {n_clusters}")
+    # ── Step 2: Preprocess ────────────────────────────────────────────────
+    if verbose:
+        print("Step 2: Preprocessing...")
+    # already_normalized=True: Weinreb data is pre-normalized, never call normalize_total
+    adata = preprocess_standard(adata, already_normalized=True)
+    if verbose:
+        print(f"  After preprocessing: {adata.shape[0]} cells × {adata.shape[1]} HVGs")
+        print(f"  lognorm_full shape: {adata.obsm['lognorm_full'].shape}")
 
-    # ------------------------------------------------------------------
-    # 3. Clonal residence-time estimation (direct, barcode-based)
-    #
-    #    Input:
-    #       adata    : AnnData with .obs['marker_state'], .obs['timepoint'],
-    #                  .obsm['clone_matrix'] (sparse csr, cells × clones)
-    #
-    #    Returns:
-    #       res_df   : pd.DataFrame, columns:
-    #                    state             : str
-    #                    clone_idx         : int
-    #                    first_time        : float
-    #                    last_time         : float
-    #                    residence_time    : float   (last_time - first_time)
-    #
-    #    TODO: implemented in src/queuediff/clonal_residence_time.py
-    # ------------------------------------------------------------------
-    print("[3/9] Estimating clonal residence times …")
-    try:
-        from queuediff.clonal_residence_time import estimate_residence_times
+    # ── Step 3: State discretization ──────────────────────────────────────
+    if verbose:
+        print("Step 3: State discretization...")
+    scores = score_marker_states(adata)
+    state_assignments = assign_states(scores)
+    if verbose:
+        print("  State distribution:")
+        for state, count in state_assignments.value_counts().sort_index().items():
+            print(f"    {state}: {count} ({count/len(state_assignments)*100:.1f}%)")
 
-        clonal_res_df = estimate_residence_times(
-            adata,
-            clone_matrix_path=DATA_DIR / "stateFate_inVitro_clone_matrix.mtx.gz",
-            metadata_path=DATA_DIR / "stateFate_inVitro_metadata.txt.gz",
-            state_col="marker_state",
-            time_col="timepoint",
-            already_preprocessed=True,
-        )
-    except Exception as exc:
-        print(f"  FAILED clonal residence time estimation: {exc}", file=sys.stderr)
-        sys.exit(1)
+    results["state_assignments"] = state_assignments
+    results["state_scores"] = scores
 
-    print(f"  States with barcode data : {len(clonal_res_df)}")
-    clonal_res_df.to_csv(RESULTS_DIR / "weinreb_clonal_residence_times.csv", index=False)
+    # ── Step 4: Cell cycle and apoptosis scoring ──────────────────────────
+    if verbose:
+        print("Step 4: Cell cycle and apoptosis scoring...")
+    # MUST use lognorm_full (full gene set). Using lognorm silently gives zero.
+    cc_scores = score_cell_cycle(adata)
+    apop_scores = score_apoptosis(adata)
+    if verbose:
+        print(f"  Mean cycling score: {cc_scores['cycling_score'].mean():.4f}")
+        print(f"  Mean net apoptotic: {apop_scores['net_apoptotic_score'].mean():.4f}")
 
-    # ------------------------------------------------------------------
-    # 4. Flux-based residence-time estimation (population-flux fallback)
-    #
-    #    Input:
-    #       adata        : AnnData with .obs['marker_state'], .obs['timepoint']
-    #       upstream_map : dict mapping each state → its immediate upstream
-    #                      source state (so flux can be attributed).
-    #
-    #    Returns:
-    #       flux_df      : pd.DataFrame, columns:
-    #                        state          : str
-    #                        mean_N         : float  (mean cell count)
-    #                        mean_flux      : float
-    #                        service_rate   : float  (μ = flux / N)
-    #
-    #    TODO: implemented in src/queuediff/flux_residence_time.py
-    # ------------------------------------------------------------------
-    print("[4/9] Estimating flux-based residence times …")
-    try:
-        from queuediff.flux_residence_time import estimate_service_rates
+    results["cell_cycle_scores"] = cc_scores
+    results["apoptosis_scores"] = apop_scores
 
-        # Hierarchical structure for the Weinreb dataset:
-        #   HSC → MPP → {CMP, LMPP} → {MEP, GMP} → Mature
-        flux_upstream = {
-            "CMP": "MPP",
-            "LMPP": "MPP",
-            "MEP": "CMP",
-            "GMP": "CMP",
-        }
-        flux_res_df = estimate_service_rates(
-            adata,
-            state_col="marker_state",
-            time_col="timepoint",
-            upstream_map=flux_upstream,
-        )
-    except Exception as exc:
-        print(f"  FAILED flux-based estimation: {exc}", file=sys.stderr)
-        sys.exit(1)
+    # ── Step 5: Division/death rate calibration ───────────────────────────
+    if verbose:
+        print("Step 5: Division/death rate calibration...")
+    # Population-dynamics calibration (NOT fraction-above-threshold)
+    rates = calibrate_division_death_rates(
+        adata, state_assignments,
+        cc_scores["cycling_score"],
+        apop_scores["net_apoptotic_score"],
+    )
+    if verbose:
+        print("  Rates per state:")
+        for _, row in rates.iterrows():
+            shrink = " [shrinking]" if row["net_shrinking"] else ""
+            print(f"    {row['state']}: div={row['division_rate']:.6f}/h, "
+                  f"death={row['death_rate']:.6f}/h{shrink}")
 
-    print(f"  States with flux estimates : {len(flux_res_df)}")
-    flux_res_df.to_csv(RESULTS_DIR / "weinreb_flux_service_rates.csv", index=False)
+    results["division_death_rates"] = rates
 
-    # ------------------------------------------------------------------
-    # 5. Distribution fitting — gamma vs. exponential per state
-    #
-    #    Input:
-    #       residence_df : pd.DataFrame with columns ['state', 'residence_time']
-    #                      (e.g., from step 3 or 4).  For Weinreb, use clonal.
-    #
-    #    Returns:
-    #       fit_results  : pd.DataFrame, one row per state, columns:
-    #                        state          : str
-    #                        n_obs          : int
-    #                        gamma_shape    : float  (MLE)
-    #                        gamma_scale    : float
-    #                        gamma_loglik   : float
-    #                        exp_rate       : float  (1/scale, MLE)
-    #                        exp_loglik     : float
-    #                        gamma_aic      : float
-    #                        gamma_bic      : float
-    #                        exp_aic        : float
-    #                        exp_bic        : float
-    #
-    #    TODO: implemented in src/queuediff/distribution_fitting.py
-    # ------------------------------------------------------------------
-    print("[5/9] Fitting service-time distributions …")
-    try:
-        from queuediff.distribution_fitting import fit_all_states
+    # ── Step 6: Clone trajectory extraction ───────────────────────────────
+    if verbose:
+        print("Step 6: Extracting clone trajectories...")
+    trajectories = extract_clone_trajectories(adata, state_assignments)
+    if verbose:
+        n_clones = trajectories["clone_id"].nunique()
+        print(f"  Clones with trajectories: {n_clones}")
+        print(f"  Total observations: {len(trajectories)}")
 
-        fit_results = fit_all_states(
-            clonal_res_df,
-            state_col="state",
-            time_col="residence_time",
-        )
-    except Exception as exc:
-        print(f"  FAILED distribution fitting: {exc}", file=sys.stderr)
-        sys.exit(1)
+    results["trajectories"] = trajectories
 
-    print(f"  States fitted : {len(fit_results)}")
-    fit_results.to_csv(RESULTS_DIR / "weinreb_distribution_fits.csv", index=False)
+    # ── Step 7: Clonal residence time estimation ──────────────────────────
+    if verbose:
+        print("Step 7: Estimating clonal residence times...")
+    # Timepoints are in days; time_unit_hours=24 converts to hours
+    residence_times = estimate_residence_times_clonal(trajectories, time_unit_hours=24.0)
+    residence_summary = compute_residence_time_summary(residence_times)
+    if verbose:
+        print("  Residence times (mean hours):")
+        for _, row in residence_summary.sort_values("mean_hours", ascending=False).iterrows():
+            print(f"    {row['state']}: {row['mean_hours']:.1f}h "
+                  f"(n={row['n_observations']})")
 
-    # ------------------------------------------------------------------
-    # 6. Model comparison — AIC / BIC + likelihood-ratio test + BH correction
-    #
-    #    Input:
-    #       fit_results  : pd.DataFrame (output of step 5).
-    #
-    #    Returns:
-    #       comparison   : pd.DataFrame, one row per state, columns:
-    #                        state              : str
-    #                        delta_aic          : float (gamma − exp;  <0 → gamma preferred)
-    #                        delta_bic          : float
-    #                        lr_pvalue          : float  (likelihood-ratio test)
-    #                        q_value_bh         : float  (Benjamini-Hochberg FDR)
-    #                        rejected_at_alpha  : bool
-    #                        preferred_model    : str   ("gamma (semi-Markov)" or "exponential (Markov)")
-    #
-    #    TODO: implemented in src/queuediff/model_comparison.py
-    # ------------------------------------------------------------------
-    print("[6/9] Comparing models …")
-    try:
-        from queuediff.model_comparison import compare_models
+    results["residence_times"] = residence_times
+    results["residence_summary"] = residence_summary
 
-        comparison = compare_models(fit_results, alpha=0.05)
-    except Exception as exc:
-        print(f"  FAILED model comparison: {exc}", file=sys.stderr)
-        sys.exit(1)
+    # ── Step 8: Normalized arrival rates ──────────────────────────────────
+    if verbose:
+        print("Step 8: Computing normalized arrival rates...")
+    arrival_rates = compute_normalized_arrival_rates(
+        trajectories, state_assignments, time_unit_hours=24.0
+    )
+    if verbose:
+        for state, rate in sorted(arrival_rates.items()):
+            print(f"    {state}: λ_norm = {rate:.6f}/h")
 
-    n_gamma = (comparison["preferred_model"] == "gamma (semi-Markov)").sum()
-    n_exp = (comparison["preferred_model"] == "exponential (Markov)").sum()
-    print(f"  Gamma preferred  : {n_gamma} states")
-    print(f"  Exp preferred    : {n_exp} states")
-    comparison.to_csv(RESULTS_DIR / "weinreb_model_comparison.csv", index=False)
+    results["arrival_rates"] = arrival_rates
 
-    # ------------------------------------------------------------------
-    # 7. Queueing network — build graph, propagate arrival rates, compute ρ
-    #
-    #    Inputs:
-    #       service_rates : dict[str, float] — μ for each state
-    #       routing_probs : dict[tuple[str, str], float] — P(transition → target | source)
-    #
-    #    Returns:
-    #       qn  : QueueingNetwork object (networkx.DiGraph in .graph)
-    #       summary : pd.DataFrame, columns:
-    #                    state             : str
-    #                    service_rate      : float
-    #                    servers           : int   (default 1)
-    #                    arrival_rate      : float  (λ, propagated downstream)
-    #                    traffic_intensity  : float  (ρ = λ / (c·μ))
-    #
-    #    TODO: implemented in src/queuediff/queueing_network.py
-    # ------------------------------------------------------------------
-    print("[7/9] Building queueing network …")
-    try:
-        from queuediff.queueing_network import build_from_data
+    # ── Step 9: Distribution fitting and model comparison ─────────────────
+    if verbose:
+        print("Step 9: Fitting distributions...")
+    comparison = compare_models_per_state(residence_times, min_samples=10)
+    comparison = apply_fdr_correction(comparison)
+    mc_summary = summarize_model_comparison(comparison)
+    if verbose:
+        print(mc_summary)
 
-        service_rates = dict(zip(fit_results["state"], fit_results["exp_rate"]))
-        routing_probs = {
-            ("HSC", "MPP"): 1.0,
-            ("MPP", "CMP"): 0.5,
-            ("MPP", "LMPP"): 0.5,
-            ("CMP", "MEP"): 0.5,
-            ("CMP", "GMP"): 0.5,
-        }
-        qn = build_from_data(service_rates, routing_probs, name="Weinreb")
-        summary = qn.summary()
-    except Exception as exc:
-        print(f"  FAILED to build queueing network: {exc}", file=sys.stderr)
-        sys.exit(1)
+    results["model_comparison"] = comparison
+    results["model_comparison_text"] = mc_summary
 
-    summary.to_csv(RESULTS_DIR / "weinreb_queueing_summary.csv", index=False)
-    print(f"  States in network : {len(summary)}")
+    # ── Step 10: Flux-based estimation (secondary) ────────────────────────
+    if verbose:
+        print("Step 10: Flux-based residence time estimation...")
+    occupancy = compute_state_occupancy(adata, state_assignments)
+    routing_structure = {
+        "HSC": ["MPP"],
+        "MPP": ["CMP", "LMPP"],
+        "CMP": ["MEP", "GMP"],
+        "LMPP": [],
+        "MEP": [],
+        "GMP": [],
+    }
+    flux_results = fit_transition_rates(occupancy, routing_structure)
+    degenerate = identify_degenerate_states(flux_results)
+    if verbose:
+        print("  Flux residence times:")
+        for _, row in flux_results.iterrows():
+            flag = " [DEGENERATE]" if row["is_degenerate"] else ""
+            print(f"    {row['state']}: {row['residence_time_hours']:.1f}h{flag}")
+        if degenerate:
+            print(f"  Degenerate states: {degenerate}")
 
-    # ------------------------------------------------------------------
-    # 8. Bottleneck diagnostics — flag and rank states by traffic intensity
-    #
-    #    Input:
-    #       summary         : pd.DataFrame (output of step 7).
-    #       rho_threshold   : float  (default 0.8; ρ > threshold → bottleneck)
-    #
-    #    Returns:
-    #       flagged         : pd.DataFrame, same as summary plus:
-    #                            is_bottleneck  : bool
-    #                            severity       : category (low/moderate/high/critical/overloaded)
-    #       stats           : dict with keys:
-    #                            n_bottlenecks, n_states, max_rho, worst_state, …
-    #
-    #    TODO: implemented in src/queuediff/bottleneck_diagnostics.py
-    # ------------------------------------------------------------------
-    print("[8/9] Computing bottleneck diagnostics …")
-    try:
-        from queuediff.bottleneck_diagnostics import (
-            flag_bottlenecks,
-            summarize_network_bottlenecks,
-        )
+    flux_summary = flux_residence_time_summary(residence_summary, flux_results)
+    results["flux_results"] = flux_results
+    results["flux_summary"] = flux_summary
 
-        flagged = flag_bottlenecks(summary, rho_threshold=0.8)
-        stats = summarize_network_bottlenecks(flagged)
-    except Exception as exc:
-        print(f"  FAILED bottleneck diagnostics: {exc}", file=sys.stderr)
-        sys.exit(1)
+    # ── Step 11: Branch point validation ──────────────────────────────────
+    if verbose:
+        print("Step 11: Branch point validation...")
+    est_probs = estimate_routing_probabilities(trajectories, routing_structure)
+    branch_validation = validate_branch_points(est_probs)
+    if verbose and not branch_validation.empty:
+        for _, row in branch_validation.iterrows():
+            print(f"    {row['source']} -> {row['target']}: "
+                  f"p = {row['estimated_prob']:.3f}")
 
-    flagged.to_csv(RESULTS_DIR / "weinreb_bottlenecks.csv", index=False)
-    print(f"  Bottlenecks (ρ > 0.8) : {stats['n_bottlenecks']}")
-    print(f"  Worst state           : {stats['worst_bottleneck_state']}  "
-          f"(ρ={stats['max_traffic_intensity']:.3f})")
+    results["routing_probabilities"] = est_probs
+    results["branch_validation"] = branch_validation
 
-    # ------------------------------------------------------------------
-    # 9. Branch-point validation — test for elevated congestion at the
-    #    monocyte branch point (CMP → MEP vs. CMP → GMP).
-    #
-    #    Input:
-    #       summary         : pd.DataFrame with .traffic_intensity and .state.
-    #       branch_states   : list[str] — the two states that diverge at the
-    #                          branch point (e.g., ['MEP', 'GMP']).
-    #
-    #    Returns:
-    #       bp_result       : dict with keys:
-    #                            branch_mean_rho       : float
-    #                            non_branch_mean_rho   : float
-    #                            statistic             : float  (test statistic)
-    #                            pvalue                : float
-    #                            test                  : str
-    #
-    #    TODO: implemented in src/queuediff/branch_point_validation.py
-    # ------------------------------------------------------------------
-    print("[9/9] Validating branch-point congestion …")
-    try:
-        from queuediff.branch_point_validation import branch_point_analysis
+    # ── Step 12: Build queueing network ───────────────────────────────────
+    if verbose:
+        print("Step 12: Building queueing network...")
 
-        bp_result = branch_point_analysis(
-            summary,
-            branch_states=["MEP", "GMP"],
-        )
-    except Exception as exc:
-        print(f"  FAILED branch-point validation: {exc}", file=sys.stderr)
-        sys.exit(1)
+    # Service rates from clonal residence times (μ = 1/mean_time)
+    service_rates = {}
+    for _, row in residence_summary.iterrows():
+        service_rates[row["state"]] = 1.0 / row["mean_hours"]
 
-    print(f"  Branch-point ρ (MEP/GMP)       : {bp_result['branch_mean_rho']:.3f}")
-    print(f"  Non-branch mean ρ              : {bp_result['non_branch_mean_rho']:.3f}")
-    print(f"  Mann-Whitney U p-value         : {bp_result['pvalue']:.4f}")
+    # Routing probabilities from branch point estimation
+    routing_probs = est_probs if est_probs else routing_structure
+    # Convert list format to dict format for build_from_data
+    routing_dict = {}
+    for src, targets in routing_probs.items():
+        if isinstance(targets, dict):
+            routing_dict[src] = targets
+        elif isinstance(targets, list):
+            if targets:
+                routing_dict[src] = {t: 1.0 / len(targets) for t in targets}
 
+    network = build_from_data(service_rates, routing_dict, name="Weinreb Hematopoiesis")
+
+    # Compute traffic intensity using normalized arrival rates
+    traffic_intensities = {}
+    for state in service_rates:
+        lam = arrival_rates.get(state, 0.0)
+        mu = service_rates[state]
+        traffic_intensities[state] = lam / mu if mu > 0 else np.inf
+
+    if verbose:
+        print("  Traffic intensities:")
+        for state in sorted(traffic_intensities, key=traffic_intensities.get, reverse=True):
+            rho = traffic_intensities[state]
+            print(f"    {state}: ρ = {rho:.6f}")
+
+    results["network"] = network
+    results["traffic_intensities"] = traffic_intensities
+
+    # ── Step 13: Bottleneck diagnostics ───────────────────────────────────
+    if verbose:
+        print("Step 13: Bottleneck diagnostics...")
+    ranking = compute_bottleneck_ranking(traffic_intensities, comparison)
+    report = generate_bottleneck_report(ranking, residence_summary, "Weinreb Hematopoiesis")
+    if verbose:
+        print(report)
+
+    results["bottleneck_ranking"] = ranking
+    results["bottleneck_report"] = report
+
+    # ── Save outputs ──────────────────────────────────────────────────────
+    if verbose:
+        print("\nSaving results...")
+
+    residence_summary.to_csv(output_dir / "residence_times.csv", index=False)
+    comparison.to_csv(output_dir / "model_comparison.csv", index=False)
+    ranking.to_csv(output_dir / "bottleneck_ranking.csv", index=False)
+    flux_summary.to_csv(output_dir / "flux_comparison.csv", index=False)
+    rates.to_csv(output_dir / "division_death_rates.csv", index=False)
+
+    # Save state assignments (needed by generate_figures.py and nestorowa cross-check)
+    state_assignments.to_frame("state").to_csv(output_dir / "state_assignments.csv")
+
+    # Save residence times as JSON (dict of arrays, needed by generate_figures.py fig2)
     import json
+    residence_times_json = {k: v.tolist() for k, v in residence_times.items()}
+    with open(output_dir / "residence_times.json", "w") as f:
+        json.dump(residence_times_json, f)
 
-    with open(RESULTS_DIR / "weinreb_branch_point_validation.json", "w") as f:
-        json.dump(bp_result, f, indent=2)
+    # Save routing probabilities as JSON (needed by generate_figures.py fig5)
+    with open(output_dir / "routing_probabilities.json", "w") as f:
+        json.dump(est_probs, f)
 
-    print()
-    print("=" * 60)
-    print("  Weinreb pipeline complete — results in results/")
-    print("=" * 60)
+    with open(output_dir / "bottleneck_report.txt", "w") as f:
+        f.write(report)
+    with open(output_dir / "model_comparison_report.txt", "w") as f:
+        f.write(mc_summary)
+
+    if verbose:
+        print(f"  Results saved to: {output_dir}")
+        print("\nPipeline complete.")
+
+    return results
 
 
 if __name__ == "__main__":
-    main()
+    script_dir = Path(__file__).parent
+    data_dir = script_dir / "data" / "raw" / "weinreb"
+    output_dir = script_dir.parent / "results"
+
+    if not data_dir.exists():
+        print(f"Data not found at {data_dir}")
+        print("Run 'python scripts/download_weinreb.py' first.")
+        sys.exit(1)
+
+    run_pipeline(data_dir, output_dir)
