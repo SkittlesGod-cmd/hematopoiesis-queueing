@@ -55,9 +55,6 @@ def extract_clone_trajectories(
         )
 
     clone_matrix = adata.obsm["clone_matrix"]
-    if issparse(clone_matrix):
-        clone_matrix = clone_matrix.toarray()
-    clone_matrix = np.asarray(clone_matrix)
 
     n_cells, n_clones = clone_matrix.shape
     cell_ids = list(adata.obs_names)
@@ -65,9 +62,12 @@ def extract_clone_trajectories(
 
     records = []
     for clone_idx in range(n_clones):
-        # Find cells belonging to this clone
-        cell_mask = clone_matrix[:, clone_idx] > 0
-        clone_cell_indices = np.where(cell_mask)[0]
+        # Find cells belonging to this clone (sparse-aware)
+        if issparse(clone_matrix):
+            col = clone_matrix[:, clone_idx]
+            clone_cell_indices = np.asarray(col.nonzero()[0]).ravel()
+        else:
+            clone_cell_indices = np.where(clone_matrix[:, clone_idx] > 0)[0]
 
         if len(clone_cell_indices) < min_clone_size:
             continue

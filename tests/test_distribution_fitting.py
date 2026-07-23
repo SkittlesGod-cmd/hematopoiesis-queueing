@@ -58,7 +58,7 @@ class TestFitGamma:
             fit_gamma(np.array([-1.0, 2.0, 3.0]))
 
     def test_rejects_too_few_samples(self):
-        with pytest.raises(ValueError, match="at least 2"):
+        with pytest.raises(ValueError, match="at least 3"):
             fit_gamma(np.array([1.0]))
 
 

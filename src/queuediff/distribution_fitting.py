@@ -74,7 +74,7 @@ def fit_gamma(data: np.ndarray, floc: float = 0.0) -> FitResult:
     When k=1, gamma reduces to exponential (the nested model).
     """
     data = np.asarray(data, dtype=np.float64)
-    _validate_data(data)
+    _validate_data(data, min_samples=3)
 
     # MLE fit with fixed location
     shape, loc, scale = stats.gamma.fit(data, floc=floc)
@@ -202,10 +202,22 @@ def likelihood_ratio_test(
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 
-def _validate_data(data: np.ndarray) -> None:
-    """Validate input data for distribution fitting."""
-    if len(data) < 2:
-        raise ValueError(f"Need at least 2 data points for fitting, got {len(data)}.")
+def _validate_data(data: np.ndarray, min_samples: int = 2) -> None:
+    """Validate input data for distribution fitting.
+
+    Parameters
+    ----------
+    data : ndarray
+        Residence time data.
+    min_samples : int, default 2
+        Minimum number of data points required. Gamma (2 params) needs >= 3.
+        Exponential (1 param) needs >= 2.
+    """
+    if len(data) < min_samples:
+        raise ValueError(
+            f"Need at least {min_samples} data points for fitting, "
+            f"got {len(data)}."
+        )
     if np.any(data <= 0):
         raise ValueError("All residence times must be strictly positive.")
     if np.any(~np.isfinite(data)):

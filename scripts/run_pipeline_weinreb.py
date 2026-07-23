@@ -6,9 +6,7 @@ End-to-end: load -> preprocess -> discretize -> estimate residence times
 
 from __future__ import annotations
 
-import os
 import sys
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -190,10 +188,7 @@ def run_pipeline(
     results["model_comparison"] = comparison
     results["model_comparison_text"] = mc_summary
 
-    # ── Step 10: Flux-based estimation (secondary) ────────────────────────
-    if verbose:
-        print("Step 10: Flux-based residence time estimation...")
-    occupancy = compute_state_occupancy(adata, state_assignments)
+    # ── Routing structure (shared by flux ODE and branch point validation) ──
     routing_structure = {
         "HSC": ["MPP"],
         "MPP": ["CMP", "LMPP"],
@@ -202,7 +197,29 @@ def run_pipeline(
         "MEP": [],
         "GMP": [],
     }
-    flux_results = fit_transition_rates(occupancy, routing_structure)
+
+    # ── Step 10: Branch point validation (before flux ODE) ────────────────
+    if verbose:
+        print("Step 10: Branch point validation...")
+    est_probs = estimate_routing_probabilities(trajectories, routing_structure)
+    branch_validation = validate_branch_points(est_probs)
+    if verbose and not branch_validation.empty:
+        for _, row in branch_validation.iterrows():
+            print(f"    {row['source']} -> {row['target']}: "
+                  f"p = {row['estimated_prob']:.3f}")
+
+    results["routing_probabilities"] = est_probs
+    results["branch_validation"] = branch_validation
+
+    # ── Step 11: Flux-based estimation (primary, uses routing probabilities) ─
+    if verbose:
+        print("Step 11: Flux-based residence time estimation (primary)...")
+    occupancy = compute_state_occupancy(adata, state_assignments)
+    # Pass estimated routing probabilities into ODE solver for accurate system matrix
+    flux_results = fit_transition_rates(
+        occupancy, routing_structure,
+        routing_probs=est_probs if est_probs else None,
+    )
     degenerate = identify_degenerate_states(flux_results)
     if verbose:
         print("  Flux residence times:")
@@ -216,33 +233,31 @@ def run_pipeline(
     results["flux_results"] = flux_results
     results["flux_summary"] = flux_summary
 
-    # ── Step 11: Branch point validation ──────────────────────────────────
-    if verbose:
-        print("Step 11: Branch point validation...")
-    est_probs = estimate_routing_probabilities(trajectories, routing_structure)
-    branch_validation = validate_branch_points(est_probs)
-    if verbose and not branch_validation.empty:
-        for _, row in branch_validation.iterrows():
-            print(f"    {row['source']} -> {row['target']}: "
-                  f"p = {row['estimated_prob']:.3f}")
-
-    results["routing_probabilities"] = est_probs
-    results["branch_validation"] = branch_validation
-
     # ── Step 12: Build queueing network ───────────────────────────────────
     if verbose:
         print("Step 12: Building queueing network...")
 
-    # Service rates from clonal residence times (μ = 1/mean_time)
+    # Service rates: flux ODE primary, clonal fallback for degenerate states
     service_rates = {}
-    for _, row in residence_summary.iterrows():
-        service_rates[row["state"]] = 1.0 / row["mean_hours"]
+    flux_degenerate_states = set(degenerate)
+    for _, row in flux_results.iterrows():
+        state = row["state"]
+        if row["is_degenerate"]:
+            # Fallback to clonal residence time for degenerate states
+            clonal_row = residence_summary[residence_summary["state"] == state]
+            if not clonal_row.empty:
+                service_rates[state] = 1.0 / clonal_row.iloc[0]["mean_hours"]
+            else:
+                service_rates[state] = row["exit_rate_per_hour"]
+        else:
+            service_rates[state] = row["exit_rate_per_hour"]
 
-    # Routing probabilities from branch point estimation
-    routing_probs = est_probs if est_probs else routing_structure
-    # Convert list format to dict format for build_from_data
+    if verbose and flux_degenerate_states:
+        print(f"  Using clonal fallback for degenerate states: {flux_degenerate_states}")
+
+    # Routing probabilities from branch point estimation (dict format)
     routing_dict = {}
-    for src, targets in routing_probs.items():
+    for src, targets in est_probs.items():
         if isinstance(targets, dict):
             routing_dict[src] = targets
         elif isinstance(targets, list):
@@ -251,12 +266,8 @@ def run_pipeline(
 
     network = build_from_data(service_rates, routing_dict, name="Weinreb Hematopoiesis")
 
-    # Compute traffic intensity using normalized arrival rates
-    traffic_intensities = {}
-    for state in service_rates:
-        lam = arrival_rates.get(state, 0.0)
-        mu = service_rates[state]
-        traffic_intensities[state] = lam / mu if mu > 0 else np.inf
+    # Compute traffic intensity via network (handles servers parameter c)
+    traffic_intensities = network.traffic_intensity(arrival_rates)
 
     if verbose:
         print("  Traffic intensities:")
@@ -271,7 +282,13 @@ def run_pipeline(
     if verbose:
         print("Step 13: Bottleneck diagnostics...")
     ranking = compute_bottleneck_ranking(traffic_intensities, comparison)
-    report = generate_bottleneck_report(ranking, residence_summary, "Weinreb Hematopoiesis")
+    # Use flux-based residence summary for display (primary method)
+    flux_display_summary = flux_results[["state", "residence_time_hours"]].copy()
+    flux_display_summary = flux_display_summary.rename(columns={"residence_time_hours": "mean_hours"})
+    flux_display_summary["std_hours"] = 0.0
+    flux_display_summary["n_observations"] = 0
+    flux_display_summary["method"] = "flux_ode"
+    report = generate_bottleneck_report(ranking, flux_display_summary, "Weinreb Hematopoiesis")
     if verbose:
         print(report)
 

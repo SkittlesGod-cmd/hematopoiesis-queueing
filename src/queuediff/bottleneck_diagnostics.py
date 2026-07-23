@@ -128,7 +128,7 @@ def generate_bottleneck_report(
 
     # Residence time summary if available
     if residence_summary is not None and not residence_summary.empty:
-        lines.append("RESIDENCE TIME ESTIMATES (clonal method)")
+        lines.append("RESIDENCE TIME ESTIMATES (flux ODE primary)")
         lines.append("-" * 50)
         lines.append(f"{'State':<8} {'Mean (h)':>10} {'Std (h)':>10} {'N':>6}")
         lines.append("-" * 50)

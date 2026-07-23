@@ -15,7 +15,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -490,60 +489,5 @@ if __name__ == "__main__":
             results["routing_probabilities"] = json.load(f)
 
     figures_dir.mkdir(parents=True, exist_ok=True)
-
-    # Figure 1: State distribution
-    if "state_assignments" in results:
-        path = figures_dir / "fig1_state_distribution.png"
-        plot_state_distribution(results["state_assignments"], path)
-        print(f"  Generated: {path}")
-        plt.close()
-
-    # Figure 2: Residence time distributions
-    if "residence_times" in results and "model_comparison" in results:
-        path = figures_dir / "fig2_residence_distributions.png"
-        plot_residence_time_distributions(
-            results["residence_times"], results["model_comparison"], path
-        )
-        print(f"  Generated: {path}")
-        plt.close()
-
-    # Figure 3: Model comparison
-    if "model_comparison" in results:
-        path = figures_dir / "fig3_model_comparison.png"
-        plot_model_comparison(results["model_comparison"], path)
-        print(f"  Generated: {path}")
-        plt.close()
-
-    # Figure 4: Traffic intensity
-    if "bottleneck_ranking" in results:
-        path = figures_dir / "fig4_traffic_intensity.png"
-        plot_traffic_intensity(results["bottleneck_ranking"], path)
-        print(f"  Generated: {path}")
-        plt.close()
-
-    # Figure 5: Network topology
-    if "routing_probabilities" in results:
-        service_rates = None
-        if "residence_summary" in results:
-            service_rates = {
-                row["state"]: 1.0 / row["mean_hours"]
-                for _, row in results["residence_summary"].iterrows()
-            }
-        path = figures_dir / "fig5_network_topology.png"
-        plot_network_topology(results["routing_probabilities"], service_rates, path)
-        print(f"  Generated: {path}")
-        plt.close()
-
-    # Figure 6: Recovery validation (always generate from synthetic data)
-    from queuediff.synthetic_generator import default_hematopoiesis_params
-    from queuediff.recovery_validation import validate_parameter_recovery
-
-    params = default_hematopoiesis_params()
-    recovery = validate_parameter_recovery(params, n_samples=1000,
-                                           rng=np.random.default_rng(42))
-    path = figures_dir / "fig6_recovery_validation.png"
-    plot_recovery_validation(recovery, path)
-    print(f"  Generated: {path}")
-    plt.close()
-
+    generate_all_figures(results, figures_dir)
     print("Done.")

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
-import os
 import shutil
 import ssl
 import urllib.request

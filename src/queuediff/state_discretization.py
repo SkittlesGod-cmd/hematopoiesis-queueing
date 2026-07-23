@@ -9,7 +9,6 @@ rates via population-dynamics calibration.
 from __future__ import annotations
 
 import warnings
-from typing import Any
 
 import anndata as ad
 import numpy as np
@@ -307,18 +306,27 @@ def calibrate_division_death_rates(
             net_growth_rate = epsilon
 
         # Population-dynamics calibration
-        death_rate = net_growth_rate / (signature_ratio - 1.0)
-
-        # Clip negative death rate to 0
+        # death_rate = net_growth_rate / (signature_ratio - 1.0)
+        # division_rate = signature_ratio * death_rate
+        #
+        # For growing states (net_growth > 0): both rates are positive.
+        # For shrinking states (net_growth < 0): the raw formula gives
+        # negative death_rate. Rather than clamping to 0 (which would give
+        # division_rate = 0 too -- biologically wrong), we preserve the
+        # magnitude and let the caller interpret net_shrinking.
         net_shrinking = net_growth_rate < 0
-        if death_rate < 0:
-            warnings.warn(
-                f"State '{state}': death_rate={death_rate:.6f} < 0, clipping to 0.",
-                stacklevel=2,
-            )
-            death_rate = 0.0
 
-        division_rate = signature_ratio * death_rate
+        if net_shrinking:
+            # Shrinking: death_rate positive, division_rate smaller
+            death_rate = abs(net_growth_rate) / (signature_ratio - 1.0)
+            division_rate = signature_ratio * death_rate
+        else:
+            death_rate = net_growth_rate / (signature_ratio - 1.0)
+            division_rate = signature_ratio * death_rate
+
+        # Safety clamp (should never trigger with the branching above)
+        death_rate = max(death_rate, 0.0)
+        division_rate = max(division_rate, 0.0)
 
         results.append({
             "state": state,

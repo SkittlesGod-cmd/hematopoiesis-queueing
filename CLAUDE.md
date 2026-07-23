@@ -42,32 +42,43 @@ python3 scripts/generate_figures.py
 
 ## Current Status
 
-**All 8 phases of build order completed. 152 tests passing, 0 failures.**
+**All 8 phases of build order completed. 209 tests passing, 0 failures.**
 
-### Completed Improvements (2026-07-22)
+### Completed Improvements (2026-07-23)
 
 | Module | Improvement | Impact |
 |--------|-------------|--------|
-| `branch_point_validation.py` | Per-cell transition counting (replaced per-clone) | Eliminates overcounting of routing probabilities |
-| `flux_residence_time.py` | Matrix exponential ODE solver (replaced RK45) | Exact solution, no numerical integration error |
-| `clonal_residence_time.py` | Groupby-based arrival rate computation | O(n²)→O(n), faster on full dataset |
-| `state_discretization.py` | Gene→index dict lookup | O(states×genes)→O(1) per gene |
-| `schema_mapping.py` | Integrated into nestorowa pipeline | Schema validation before cross-check |
-| `run_pipeline_weinreb.py` | Added data persistence | Saves state_assignments.csv, residence_times.json, routing_probabilities.json |
-| `generate_figures.py` | All 6 figures from `__main__` | Previously only 3/6 |
-| `run_pipeline_nestorowa.py` | Fixed `__main__` block | Now loads Weinreb results and runs cross-check |
-| `download_nestorowa.py` | Added SSL workaround | Matches download_weinreb.py pattern |
+| `flux_residence_time.py` | Accepts `routing_probs` from branch validation | ODE system matrix uses estimated probabilities instead of equal-split |
+| `run_pipeline_weinreb.py` | Flux ODE is PRIMARY residence time method | Clonal method now fallback only (48h resolution limitation) |
+| `run_pipeline_weinreb.py` | Branch point validation → flux ODE order | Estimated routing probabilities feed into ODE solver |
+| `run_pipeline_weinreb.py` | Uses `network.traffic_intensity()` | Consistent ρ = λ/(c·μ) including servers parameter |
+| `state_discretization.py` | Shrinking state death rate fix | `|net_growth|/(ratio-1)` instead of clamping to 0 |
+| `clonal_residence_time.py` | Sparse clone extraction | No dense `.toarray()` — avoids 1.6GB OOM on full data |
+| `distribution_fitting.py` | Gamma min samples ≥3 | Matches docstring (2-param fit needs ≥3 points) |
+| `generate_figures.py` | `__main__` calls `generate_all_figures()` | Eliminates ~100 lines of code duplication |
+| `flux_residence_time.py` | Removed unused imports | Cleaner import section |
+| `run_pipeline_weinreb.py` | Removed unused imports | Cleaner import section |
+| `download_weinreb.py` | Removed unused imports | Cleaner import section |
+| `bottleneck_diagnostics.py` | Report label updated | "flux ODE primary" vs "clonal method" |
 
-### Fixed Bugs (2026-07-22)
-1. Per-clone transition counting → per-cell (branch_point_validation.py)
-2. RK45 integration error → matrix exponential (flux_residence_time.py)
-3. Unused `import sys` removed (run_synthetic_sweep.py)
-4. SSL certificate workaround missing from download_nestorowa.py
+### Fixed Bugs (2026-07-23)
+1. Flux ODE used equal-split routing (50/50) instead of estimated probabilities
+2. Pipeline computed `lam/mu` manually, bypassing QueueingNetwork and servers param
+3. Division/death rate calibration set `division_rate=0` for shrinking states
+4. Clone matrix dense conversion (`toarray()`) caused ~1.6GB OOM risk
+5. `fit_gamma` validated ≥2 but docstring said ≥3 — now enforces ≥3
+6. `generate_figures.py` duplicated all figure logic between `__main__` and `generate_all_figures()`
+7. Bottleneck report labeled "clonal method" but uses flux ODE as primary
+8. 5 unused imports across 4 files
 
-### Test Coverage Added (2026-07-22)
-- `test_bottleneck_diagnostics.py` (12 tests)
-- `test_branch_point_validation.py` (10 tests)
-- `test_recovery_validation.py` (17 tests)
+### Test Coverage Added (2026-07-23)
+- `test_structural_crosscheck.py` (20 tests)
+- `test_schema_mapping.py` (23 tests)
+- `test_pipeline_integration.py` (14 tests)
+
+### Total Test Count
+**209 tests** across 16 test files:
+- 152 original tests + 57 new (20 + 23 + 14)
 
 ### Current Blocker
 **Weinreb data download problematic.** File on server is ~1.97GB vs expected 136MB. May need alternative source (GEO accession GSE140802).
@@ -208,6 +219,9 @@ All 6 states must show gamma-preferred (not exponential).
 | `test_bottleneck_diagnostics.py` | 12 tests |
 | `test_branch_point_validation.py` | 10 tests |
 | `test_recovery_validation.py` | 17 tests |
+| `test_structural_crosscheck.py` | 20 tests |
+| `test_schema_mapping.py` | 23 tests |
+| `test_pipeline_integration.py` | 14 tests |
 
 ### Scripts (`scripts/`)
 - `download_weinreb.py` — Download from kleintools.hms.harvard.edu
@@ -234,13 +248,15 @@ All 6 states must show gamma-preferred (not exponential).
 ## Test Execution Quick Reference
 
 ```bash
-# Run all 152 tests
+# Run all 209 tests
 python3 -m pytest -q --tb=short
 
 # Run specific module tests
 python3 -m pytest tests/test_bottleneck_diagnostics.py -q --tb=short
 python3 -m pytest tests/test_branch_point_validation.py -q --tb=short
-python3 -m pytest tests/test_recovery_validation.py -q --tb=short
+python3 -m pytest tests/test_structural_crosscheck.py -q --tb=short
+python3 -m pytest tests/test_schema_mapping.py -q --tb=short
+python3 -m pytest tests/test_pipeline_integration.py -q --tb=short
 python3 -m pytest tests/test_flux_residence_time.py -q --tb=short
 python3 -m pytest tests/test_queueing_network.py -q --tb=short
 

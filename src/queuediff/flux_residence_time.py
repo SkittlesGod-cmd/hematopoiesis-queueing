@@ -12,9 +12,6 @@ Known limitations (document, do not try to fix):
 
 from __future__ import annotations
 
-import warnings
-from typing import Any
-
 import numpy as np
 import pandas as pd
 from scipy.linalg import expm
@@ -60,6 +57,7 @@ def fit_transition_rates(
     occupancy: pd.DataFrame,
     routing_structure: dict[str, list[str]],
     rate_bounds: tuple[float, float] = (1e-4, 1.0),
+    routing_probs: dict[str, dict[str, float]] | None = None,
 ) -> pd.DataFrame:
     """Fit transition rates by minimizing ODE residuals against observed occupancy.
 
@@ -73,6 +71,10 @@ def fit_transition_rates(
         Terminal states have empty lists.
     rate_bounds : tuple[float, float]
         (lower, upper) bounds for transition rates (per hour).
+    routing_probs : dict[str, dict[str, float]], optional
+        Estimated routing probabilities from branch_point_validation.
+        If provided, used instead of equal-split probabilities in the ODE.
+        Keyed by source state, values are {target: probability}.
 
     Returns
     -------
@@ -87,6 +89,8 @@ def fit_transition_rates(
     numerical integration error of RK45-based methods.
     Timepoints are converted from days to hours (×24) before solving.
     Failure to do this causes 24x unit mismatch -- all ODE fits degenerate.
+    When routing_probs are provided, they are used instead of equal split
+    at branch points, giving more accurate system matrix construction.
     """
     states = list(occupancy.columns)
     timepoints_days = np.array(occupancy.index, dtype=np.float64)
@@ -104,7 +108,10 @@ def fit_transition_rates(
     def objective(rates):
         """Sum of squared residuals between ODE solution (via expm) and observed fractions."""
         rates = np.clip(rates, rate_bounds[0], rate_bounds[1])
-        predicted = _solve_ode(y0, rates, states, routing_structure, timepoints_hours)
+        predicted = _solve_ode(
+            y0, rates, states, routing_structure, timepoints_hours,
+            routing_probs=routing_probs,
+        )
         if predicted is None:
             return 1e10
         return float(np.sum((predicted - observed) ** 2))
@@ -207,6 +214,7 @@ def _solve_ode(
     states: list[str],
     routing_structure: dict[str, list[str]],
     timepoints_hours: np.ndarray,
+    routing_probs: dict[str, dict[str, float]] | None = None,
 ) -> np.ndarray | None:
     """Solve the state-occupancy ODE system via matrix exponential.
 
@@ -228,6 +236,9 @@ def _solve_ode(
         Downstream connections per state.
     timepoints_hours : ndarray
         Evaluation times in HOURS.
+    routing_probs : dict[str, dict[str, float]], optional
+        Estimated routing probabilities. If provided, used instead of
+        equal-split probabilities at branch points.
 
     Returns
     -------
@@ -238,16 +249,24 @@ def _solve_ode(
     n_states = len(states)
     state_idx = {s: i for i, s in enumerate(states)}
 
-    # Build routing matrix (equal split among downstream states)
+    # Build routing matrix using estimated probabilities where available,
+    # falling back to equal split for missing entries
     routing = np.zeros((n_states, n_states))
     for src, targets in routing_structure.items():
         if src not in state_idx:
             continue
         if targets:
-            prob = 1.0 / len(targets)
-            for tgt in targets:
-                if tgt in state_idx:
-                    routing[state_idx[tgt], state_idx[src]] = prob
+            if routing_probs and src in routing_probs:
+                # Use estimated routing probabilities
+                for tgt, prob in routing_probs[src].items():
+                    if tgt in state_idx:
+                        routing[state_idx[tgt], state_idx[src]] = prob
+            else:
+                # Fallback: equal split
+                prob = 1.0 / len(targets)
+                for tgt in targets:
+                    if tgt in state_idx:
+                        routing[state_idx[tgt], state_idx[src]] = prob
 
     # Build the system matrix A: dy_i/dt = -rates[i] * y_i + sum_j(routing[i,j] * rates[j] * y_j)
     A = np.zeros((n_states, n_states))

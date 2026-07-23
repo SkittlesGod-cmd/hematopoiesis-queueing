@@ -1,7 +1,7 @@
 # queuediff — Semi-Markov Queueing Network for Hematopoietic Differentiation
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)]()
-[![Tests](https://img.shields.io/badge/tests-152_passing-green.svg)]()
+[![Tests](https://img.shields.io/badge/tests-209_passing-green.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
 
 **queuediff** models hematopoietic stem cell differentiation as a semi-Markov queueing network with gamma-distributed service times using scRNA-seq time-series data (Weinreb et al. 2020). It identifies rate-limiting bottlenecks in the differentiation process that may trigger clonal expansion and leukemic transformation.
@@ -49,15 +49,15 @@ Raw scRNA-seq data (Weinreb 2020)
         ↓
    5. Clone Trajectory Extraction (LARRY barcodes)
         ↓
-   6. Clonal Residence Time Estimation
+   6. Clonal Residence Time Estimation (secondary/fallback)
         ↓
    7. Gamma vs Exponential Distribution Fitting
         ↓
    8. FDR-Corrected Model Comparison
         ↓
-   9. ODE-Based Flux Estimation (matrix exponential)
+   9. Branch Point Validation (per-cell tracking, routing probabilities)
         ↓
-  10. Branch Point Validation (per-cell tracking)
+  10. ODE-Based Flux Estimation (primary — matrix exponential, uses routing probs)
         ↓
   11. Queueing Network Construction
         ↓
@@ -85,7 +85,7 @@ python3 -m pip install -e ".[dev]"
 ## Running Tests
 
 ```bash
-# Full test suite (152 tests)
+# Full test suite (209 tests)
 python3 -m pytest -q --tb=short
 
 # Specific modules
@@ -129,7 +129,7 @@ src/queuediff/              ← Core package (14 modules)
 │   ├── distribution_fitting.py   MLE gamma/exponential fitting
 │   ├── model_comparison.py       AIC/BIC, FDR correction
 │   ├── clonal_residence_time.py  LARRY barcode trajectory analysis
-│   ├── flux_residence_time.py    ODE-based flux estimation
+│   ├── flux_residence_time.py    ODE-based flux estimation (PRIMARY)
 │   ├── queueing_network.py       NetworkX queueing model
 │   ├── bottleneck_diagnostics.py ρ ranking & bottleneck detection
 │   ├── branch_point_validation.py Routing probability estimation
@@ -139,22 +139,25 @@ src/queuediff/              ← Core package (14 modules)
 │   ├── schema_mapping.py         Dataset schema definition
 │   └── __init__.py               Package marker (v0.1.0)
 │
-tests/                      ← 13 test files, 152 tests
+tests/                      ← 16 test files, 209 tests
 └── scripts/                ← Pipeline orchestration
 ```
 
 ---
 
-## Key Technical Improvements (2026-07-22)
+## Key Technical Improvements (2026-07-23)
 
 | Area | Improvement | Impact |
 |------|-------------|--------|
-| **ODE solver** | Matrix exponential (`scipy.linalg.expm`) replaces RK45 | Exact solution, no numerical integration error |
-| **Branch points** | Per-cell tracking replaces per-clone aggregation | Eliminates routing probability overcounting |
-| **Arrival rates** | Groupby dict replaces O(n²) set operations | Linear-time, scales to 130k cells |
-| **Gene scoring** | Dict lookup replaces list.index() per gene | O(1) vs O(n) per gene lookup |
-| **Data persistence** | Pipeline saves CSVs/JSON for all figures | All 6 figures generate from saved state |
-| **Test coverage** | 35 new tests across 3 new files | 152 total, all passing |
+| **Residence time method** | Flux ODE is now PRIMARY (was clonal) | Accurate 8-19h times vs clonal's 48h+ resolution limit |
+| **ODE routing** | Branch point probabilities feed into system matrix | Not equal-split 50/50 at branch points |
+| **Traffic intensity** | Uses `network.traffic_intensity()` built-in method | Consistent ρ = λ/(c·μ), covers all network states |
+| **Division/death rates** | Shrinking states preserve positive death rate | Biologically correct (cells still divide) |
+| **Clone extraction** | Sparse column indexing, no `.toarray()` | No 1.6GB OOM risk on full Weinreb data |
+| **Gamma validation** | Enforces min_samples=3 (was 2) | Matches docstring; 2-param fit needs ≥3 points |
+| **Figure generation** | `__main__` calls `generate_all_figures()` | Eliminated ~100 lines of code duplication |
+| **Test coverage** | 3 new test files (57 tests) | 209 total — structural, schema, integration |
+| **Code cleanup** | 5 unused imports removed across 4 files | Cleaner import sections |
 
 ---
 
